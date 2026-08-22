@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 Antigravity Taktik SDR Terminali - Ana Kullanıcı Arayüzü (Main UI)
-Modern, koyu taktik temalı PyQt5 ana pencere, RF Link Bütçesi ve ZeroMQ Middleware Entegrasyonu.
+Gerçek zamanlı FFT Spektrum Analizörü, RF Link Bütçesi ve ZeroMQ Middleware Entegrasyonu.
 """
 
 import sys
 import time
 import numpy as np
 import pyqtgraph as pg
+import zmq
 from PyQt5.QtCore import Qt, QTimer, QTime
 from PyQt5.QtGui import QColor, QFont, QIcon, QPalette, QPen
 from PyQt5.QtWidgets import (
@@ -242,28 +243,41 @@ class TacticalMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.is_running = False
-        
+
+        # DSP & FFT Akış Değişkenleri
+        self.sample_rate = 2.048e6  # 2.048 MHz örnekleme
+        self.center_freq_mhz = 433.0
+        self.fft_size = 1024
+        self.total_frames_received = 0
+        self.last_fps_time = time.time()
+        self.fps_counter = 0
+
         # ZeroMQ Middleware Başlatma
         self.zmq_pub = None
         self.zmq_sub = None
         self.init_zmq()
 
+        # Arayüzü Kur
         self.init_ui()
+
+        # FFT Veri Alım Zamanlayıcısı (30 ms ~ 33 FPS polling)
+        self.dsp_timer = QTimer(self)
+        self.dsp_timer.timeout.connect(self.process_incoming_dsp_data)
 
     def init_zmq(self):
         """ZeroMQ PUB/SUB bileşenlerini ilklendirir."""
         try:
-            self.zmq_pub = ZMQPublisher(address="tcp://127.0.0.1:5555")
-            self.zmq_sub = ZMQSubscriber(address="tcp://127.0.0.1:5555")
-            print("[ZMQ INIT] ZeroMQ PUB/SUB köprüsü (tcp://127.0.0.1:5555) başarıyla oluşturuldu.")
+            self.zmq_pub = ZMQPublisher(address="tcp://127.0.0.1:5555", bind_mode=False)
+            self.zmq_sub = ZMQSubscriber(address="tcp://127.0.0.1:5555", topics=["IQ", ""])
+            print("[ZMQ INIT] ZeroMQ PUB/SUB köprüsü (tcp://127.0.0.1:5555) hazırlandı.")
         except Exception as e:
             print(f"[ZMQ HATA] ZeroMQ ilklendirme hatası: {e}")
 
     def init_ui(self):
         # 1. Ana Pencere Temel Ayarları
         self.setWindowTitle("Antigravity Taktik SDR Terminali")
-        self.resize(1340, 840)
-        self.setMinimumSize(1020, 650)
+        self.resize(1360, 860)
+        self.setMinimumSize(1040, 660)
 
         # 2. Merkezi Widget ve Ana Düzen
         central_widget = QWidget(self)
@@ -286,7 +300,7 @@ class TacticalMainWindow(QMainWindow):
         splitter.addWidget(central_tabs)
 
         # Bölücü Başlangıç Oranları (%22 Kontrol, %78 Çalışma Alanı)
-        splitter.setSizes([290, 1050])
+        splitter.setSizes([290, 1070])
 
         # 6. Alt Durum Çubuğu (Status Bar)
         self.setup_status_bar()
@@ -364,11 +378,11 @@ class TacticalMainWindow(QMainWindow):
         rf_layout = QVBoxLayout(rf_group)
         rf_layout.setSpacing(8)
 
-        lbl_freq = QLabel("Merkez Frekans: 433.00 MHz")
+        lbl_freq = QLabel(f"Merkez Frekans: {self.center_freq_mhz:.2f} MHz")
         lbl_freq.setStyleSheet("color: #8b949e; font-size: 12px;")
         lbl_gain = QLabel("Donanım Kazancı: 20 dB")
         lbl_gain.setStyleSheet("color: #8b949e; font-size: 12px;")
-        lbl_sample_rate = QLabel("Örnekleme Hızı: 2.048 MS/s")
+        lbl_sample_rate = QLabel(f"Örnekleme Hızı: {self.sample_rate/1e6:.3f} MS/s")
         lbl_sample_rate.setStyleSheet("color: #8b949e; font-size: 12px;")
 
         rf_layout.addWidget(lbl_freq)
@@ -382,11 +396,11 @@ class TacticalMainWindow(QMainWindow):
         mod_layout = QVBoxLayout(module_group)
         mod_layout.setSpacing(6)
 
-        lbl_m1 = QLabel("✔ Spektrum Analizörü (Hazır)")
+        lbl_m1 = QLabel("✔ Gerçek Zamanlı Spektrum (Aktif)")
         lbl_m1.setStyleSheet("color: #00ff66; font-size: 11px;")
         lbl_m2 = QLabel("✔ RF Link Bütçesi Hesaplayıcı")
         lbl_m2.setStyleSheet("color: #00ff66; font-size: 11px;")
-        lbl_m3 = QLabel("✔ ZeroMQ PUB/SUB (127.0.0.1:5555)")
+        lbl_m3 = QLabel("✔ ZeroMQ I/Q Veri Akışı (5555)")
         lbl_m3.setStyleSheet("color: #58a6ff; font-size: 11px;")
 
         mod_layout.addWidget(lbl_m1)
@@ -411,15 +425,100 @@ class TacticalMainWindow(QMainWindow):
         self.tab_widget = QTabWidget()
         self.tab_widget.setDocumentMode(True)
 
-        # 1. Sekme: RF Kapsama Alanı (Link Budget)
+        # 1. Sekme: Gerçek Zamanlı Spektrum Analizörü (Phase 6)
+        tab_spectrum = self.create_spectrum_tab()
+        self.tab_widget.addTab(tab_spectrum, "📡 Spektrum Analizörü")
+
+        # 2. Sekme: RF Kapsama Alanı (Link Budget)
         tab_rf_coverage = self.create_rf_coverage_tab()
         self.tab_widget.addTab(tab_rf_coverage, "📊 RF Kapsama Alanı")
 
-        # 2. Sekme: Spektrum ve Şelale Göstergesi (Real-time FFT)
-        tab_spectrum = self.create_spectrum_tab()
-        self.tab_widget.addTab(tab_spectrum, "📡 Spektrum & Şelale")
-
         return self.tab_widget
+
+    def create_spectrum_tab(self) -> QWidget:
+        """Gerçek Zamanlı FFT Spektrum Analizörü Sekmesini oluşturur."""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        # 1. Başlık ve Telemetri Çubuğu
+        header_bar = QHBoxLayout()
+        title = QLabel("GERÇEK ZAMANLI SPEKTRUM ANALİZÖRÜ (FFT)")
+        title.setStyleSheet(
+            "color: #00ff66; font-size: 15px; font-weight: bold; letter-spacing: 1px;"
+        )
+        header_bar.addWidget(title)
+        header_bar.addStretch()
+
+        self.lbl_dsp_badge = QLabel("[ AKIŞ: BEKLEMEDE ]")
+        self.lbl_dsp_badge.setStyleSheet("color: #ffaa00; font-weight: bold; font-size: 11px;")
+        header_bar.addWidget(self.lbl_dsp_badge)
+
+        layout.addLayout(header_bar)
+
+        # 2. Spektrum Telemetri HUD Kartları
+        hud_layout = QHBoxLayout()
+        hud_layout.setSpacing(12)
+
+        self.card_peak_freq = QLabel("-- kHz")
+        c1 = self.create_hud_card("TEPE FREKANSI OFSETİ", self.card_peak_freq, "#00ff66")
+        hud_layout.addWidget(c1)
+
+        self.card_peak_pwr = QLabel("-- dB")
+        c2 = self.create_hud_card("TEPE GÜCÜ", self.card_peak_pwr, "#58a6ff")
+        hud_layout.addWidget(c2)
+
+        self.card_noise_floor = QLabel("-- dB")
+        c3 = self.create_hud_card("TABAN GÜRÜLTÜSÜ", self.card_noise_floor, "#f0f6fc")
+        hud_layout.addWidget(c3)
+
+        self.card_fps_val = QLabel("0.0 FPS")
+        c4 = self.create_hud_card("GÖSTERİM HIZI", self.card_fps_val, "#ffaa00")
+        hud_layout.addWidget(c4)
+
+        layout.addLayout(hud_layout)
+
+        # 3. PyQtGraph Spektrum Analizör Grafiği
+        self.spectrum_plot = pg.PlotWidget()
+        self.spectrum_plot.setBackground("#090d13")
+        self.spectrum_plot.showGrid(x=True, y=True, alpha=0.3)
+
+        # X ve Y Eksen Etiketleri (Türkçe)
+        self.spectrum_plot.setLabel("left", "Genlik", units="dB", color="#c9d1d9")
+        self.spectrum_plot.setLabel("bottom", "Frekans (Bant)", units="MHz", color="#c9d1d9")
+
+        # Grafik Başlığı
+        self.spectrum_plot.setTitle(
+            '<span style="color: #00ff66; font-size: 13px; font-weight: bold;">'
+            "Gerçek Zamanlı Spektrum Analizi</span>"
+        )
+        self.spectrum_plot.setYRange(-120, 10, padding=0.02)
+
+        # Spektrum Çizgisi (Taktik Yeşil)
+        self.spectrum_curve = self.spectrum_plot.plot(
+            pen=pg.mkPen(color="#00ff66", width=1.8),
+            name="Anlık Spektrum"
+        )
+
+        # Tepe Tepe Maksimum Tutma Çizgisi (Max-Hold Cyan)
+        self.max_hold_curve = self.spectrum_plot.plot(
+            pen=pg.mkPen(color="#388bfd", width=1.2, style=Qt.DashLine),
+            name="Tepe Tutma (Max-Hold)"
+        )
+        self.max_hold_data = None
+
+        # Başlangıç boş eğrisi
+        freq_axis_initial = np.linspace(
+            -self.sample_rate / (2 * 1e6),
+            self.sample_rate / (2 * 1e6),
+            self.fft_size,
+        )
+        self.spectrum_curve.setData(freq_axis_initial, np.full(self.fft_size, -100.0))
+
+        layout.addWidget(self.spectrum_plot, stretch=1)
+
+        return container
 
     def create_rf_coverage_tab(self) -> QWidget:
         """RF Link Bütçesi ve Kapsama Alanı Hesaplayıcı Sekmesini oluşturur."""
@@ -587,57 +686,80 @@ class TacticalMainWindow(QMainWindow):
         lbl_title = QLabel(title_text)
         lbl_title.setStyleSheet("color: #8b949e; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;")
 
-        value_label.setStyleSheet(f"color: {val_color}; font-size: 16px; font-weight: bold; font-family: Consolas;")
+        value_label.setStyleSheet(f"color: {val_color}; font-size: 15px; font-weight: bold; font-family: Consolas;")
 
         layout.addWidget(lbl_title)
         layout.addWidget(value_label)
         return frame
 
-    def create_spectrum_tab(self) -> QWidget:
-        """Spektrum ve Şelale Gösterge Sekmesini oluşturur (Gelecek Aşamalar İçin)."""
-        container = QFrame()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+    def process_incoming_dsp_data(self):
+        """ZMQ üzerinden gelen I/Q verilerini okur, FFT hesaplar ve grafiği günceller."""
+        if not self.zmq_sub:
+            return
 
-        header_bar = QHBoxLayout()
-        title = QLabel("GERÇEK ZAMANLI SPEKTRUM VE ŞELALE (FFT)")
-        title.setStyleSheet("color: #00ff66; font-size: 15px; font-weight: bold; letter-spacing: 1px;")
-        header_bar.addWidget(title)
-        header_bar.addStretch()
+        latest_iq = None
+        # Kuyruktaki tüm paketleri tüketip en son paketi al (Düşük gecikme için)
+        while True:
+            result = self.zmq_sub.receive_iq_data(flags=zmq.NOBLOCK)
+            if result is None:
+                break
+            _, iq_data = result
+            if len(iq_data) > 0:
+                latest_iq = iq_data
+                self.total_frames_received += 1
+                self.fps_counter += 1
 
-        badge = QLabel("[ DURUM: BEKLEMEDE ]")
-        badge.setStyleSheet("color: #ffaa00; font-weight: bold; font-size: 11px;")
-        header_bar.addWidget(badge)
-        layout.addLayout(header_bar)
+        if latest_iq is not None:
+            N = len(latest_iq)
+            self.fft_size = N
 
-        placeholder_frame = QFrame()
-        placeholder_frame.setStyleSheet(
-            "background-color: #090d13; border: 1px dashed #30363d; border-radius: 8px;"
-        )
-        p_layout = QVBoxLayout(placeholder_frame)
-        p_layout.setAlignment(Qt.AlignCenter)
+            # 1. Hanning Pencereleme Uygula (Spektral Sızıntıyı Önle)
+            window = np.hanning(N)
+            windowed_iq = latest_iq * window
 
-        icon_label = QLabel("📡")
-        icon_label.setStyleSheet("font-size: 48px; background: transparent;")
-        icon_label.setAlignment(Qt.AlignCenter)
+            # 2. FFT Hesaplama ve Merkezleme (FFT Shift)
+            fft_result = np.fft.fft(windowed_iq, n=N)
+            fft_shifted = np.fft.fftshift(fft_result)
 
-        info_title = QLabel("SPEKTRUM ANALİZÖRÜ VE ŞELALE EKRANI")
-        info_title.setStyleSheet("color: #f0f6fc; font-size: 16px; font-weight: bold; background: transparent;")
-        info_title.setAlignment(Qt.AlignCenter)
+            # 3. Logaritmik Büyüklük (dB) Dönüşümü
+            magnitude_linear = np.abs(fft_shifted) / N
+            magnitude_db = 20.0 * np.log10(np.maximum(magnitude_linear, 1e-7))
 
-        info_desc = QLabel(
-            "ZMQ ve SDR veri akışı entegrasyonu tamamlandığında canlı FFT spektrumu ve şelale grafiği burada akacaktır."
-        )
-        info_desc.setStyleSheet("color: #8b949e; font-size: 12px; background: transparent;")
-        info_desc.setAlignment(Qt.AlignCenter)
+            # 4. Frekans Ekseni (MHz Cinsinden Merkez Çevresi)
+            half_bw_mhz = (self.sample_rate / 2.0) / 1e6
+            freq_axis = np.linspace(-half_bw_mhz, half_bw_mhz, N)
 
-        p_layout.addWidget(icon_label)
-        p_layout.addWidget(info_title)
-        p_layout.addWidget(info_desc)
+            # 5. Spektrum Eğrisini Güncelle
+            self.spectrum_curve.setData(freq_axis, magnitude_db)
 
-        layout.addWidget(placeholder_frame)
-        return container
+            # 6. Max-Hold (Tepe Tutma) Güncelle
+            if self.max_hold_data is None or len(self.max_hold_data) != N:
+                self.max_hold_data = magnitude_db.copy()
+            else:
+                self.max_hold_data = np.maximum(self.max_hold_data * 0.995, magnitude_db)
+            self.max_hold_curve.setData(freq_axis, self.max_hold_data)
+
+            # 7. Tepe Frekans ve Güç Analizi
+            peak_idx = int(np.argmax(magnitude_db))
+            peak_freq_khz = freq_axis[peak_idx] * 1000.0
+            peak_pwr = magnitude_db[peak_idx]
+            noise_floor_est = float(np.median(magnitude_db))
+
+            self.card_peak_freq.setText(f"{peak_freq_khz:+.1f} kHz")
+            self.card_peak_pwr.setText(f"{peak_pwr:.1f} dB")
+            self.card_noise_floor.setText(f"{noise_floor_est:.1f} dB")
+
+            # FPS Sayacı Güncellemesi
+            now = time.time()
+            dt = now - self.last_fps_time
+            if dt >= 1.0:
+                fps = self.fps_counter / dt
+                self.card_fps_val.setText(f"{fps:.1f} FPS")
+                self.fps_counter = 0
+                self.last_fps_time = now
+
+            self.lbl_dsp_badge.setText(f"[ AKIŞ: CANLI ({N} I/Q) ]")
+            self.lbl_dsp_badge.setStyleSheet("color: #00ff66; font-weight: bold; font-size: 11px;")
 
     def calculate_rf_coverage(self):
         """Kullanıcı girişlerine göre Friis Link Bütçesini hesaplar ve grafiği günceller."""
@@ -689,9 +811,8 @@ class TacticalMainWindow(QMainWindow):
 
     def perform_zmq_ping_test(self):
         """ZeroMQ PUB/SUB köprüsünü test eder ve sonucu konsola ile arayüze yansıtır."""
+        # Geçici bağımsız test soketi ile test yap
         success, detail = execute_ping_test(
-            publisher=self.zmq_pub,
-            subscriber=self.zmq_sub,
             address="tcp://127.0.0.1:5555",
         )
         if success:
@@ -708,7 +829,7 @@ class TacticalMainWindow(QMainWindow):
         self.status_msg = QLabel("Hazır")
         self.status_msg.setStyleSheet("color: #00ff66; font-weight: bold;")
 
-        self.freq_badge = QLabel("Frekans: 433.00 MHz")
+        self.freq_badge = QLabel(f"Frekans: {self.center_freq_mhz:.2f} MHz")
         self.freq_badge.setStyleSheet("color: #8b949e;")
 
         self.clock_label = QLabel(QTime.currentTime().toString("HH:mm:ss"))
@@ -745,8 +866,11 @@ class TacticalMainWindow(QMainWindow):
             self.lbl_system_status.setStyleSheet(
                 "color: #00ff66; font-weight: bold; font-size: 11px; padding: 4px;"
             )
-            self.status_msg.setText("Sistem Aktif - Veri Alımı Başlatıldı")
+            self.status_msg.setText("Sistem Aktif - ZMQ Spektrum Alımı Başlatıldı")
             self.status_msg.setStyleSheet("color: #00ff66; font-weight: bold;")
+            
+            # FFT alım zamanlayıcısını başlat (~33 FPS)
+            self.dsp_timer.start(30)
         else:
             self.btn_start.setText("Sistemi Başlat")
             self.btn_start.setStyleSheet("")  # Varsayılan taktik yeşile döner
@@ -756,9 +880,16 @@ class TacticalMainWindow(QMainWindow):
             )
             self.status_msg.setText("Sistem Durduruldu - Beklemede")
             self.status_msg.setStyleSheet("color: #ffaa00; font-weight: bold;")
+            
+            # Zamanlayıcıyı durdur
+            self.dsp_timer.stop()
+            self.lbl_dsp_badge.setText("[ AKIŞ: DURDURULDU ]")
+            self.lbl_dsp_badge.setStyleSheet("color: #ffaa00; font-weight: bold; font-size: 11px;")
 
     def closeEvent(self, event):
-        """Pencere kapatıldığında ZeroMQ soketlerini temizler."""
+        """Pencere kapatıldığında zamanlayıcıları ve ZeroMQ soketlerini temizler."""
+        if hasattr(self, "dsp_timer") and self.dsp_timer.isActive():
+            self.dsp_timer.stop()
         if self.zmq_pub:
             self.zmq_pub.close()
         if self.zmq_sub:
