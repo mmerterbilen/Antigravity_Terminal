@@ -2,14 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 Antigravity Taktik SDR Terminali - Ana Kullanıcı Arayüzü (Main UI)
-Modern, koyu taktik temalı PyQt5 ana pencere çerçevesi.
+Modern, koyu taktik temalı PyQt5 ana pencere ve RF Link Bütçesi Hesaplayıcı modülü.
 """
 
 import sys
+import numpy as np
+import pyqtgraph as pg
 from PyQt5.QtCore import Qt, QTimer, QTime
-from PyQt5.QtGui import QColor, QFont, QIcon, QPalette
+from PyQt5.QtGui import QColor, QFont, QIcon, QPalette, QPen
 from PyQt5.QtWidgets import (
     QApplication,
+    QDoubleSpinBox,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -21,9 +25,12 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStatusBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
+
+from rf_calculator import compute_link_budget
 
 
 TACTICAL_STYLESHEET = """
@@ -38,16 +45,50 @@ QWidget {
     font-size: 13px;
 }
 
+/* --- Sekme Çubuğu (QTabWidget) --- */
+QTabWidget::pane {
+    border: 1px solid #30363d;
+    background-color: #0d1117;
+    border-radius: 6px;
+    top: -1px;
+}
+
+QTabBar::tab {
+    background-color: #161b22;
+    color: #8b949e;
+    border: 1px solid #30363d;
+    border-bottom: none;
+    padding: 10px 20px;
+    font-weight: bold;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    margin-right: 4px;
+}
+
+QTabBar::tab:selected {
+    background-color: #21262d;
+    color: #00ff66;
+    border-top: 2px solid #00ff66;
+    border-bottom: 1px solid #21262d;
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: #1c2128;
+    color: #f0f6fc;
+}
+
 /* --- Panel & GroupBox Stili --- */
 QGroupBox {
     background-color: #161b22;
     border: 1px solid #30363d;
     border-radius: 6px;
-    margin-top: 24px;
+    margin-top: 22px;
     padding: 14px 10px 10px 10px;
     font-weight: bold;
     color: #00ff66;
-    letter-spacing: 1px;
+    letter-spacing: 0.8px;
 }
 
 QGroupBox::title {
@@ -59,6 +100,34 @@ QGroupBox::title {
     border-radius: 4px;
     color: #00ff66;
     font-size: 11px;
+}
+
+/* --- Girdi Kutuları (QDoubleSpinBox) --- */
+QDoubleSpinBox {
+    background-color: #0d1117;
+    color: #00ff66;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-family: "Consolas", monospace;
+    font-size: 13px;
+    font-weight: bold;
+    min-height: 22px;
+}
+
+QDoubleSpinBox:focus {
+    border: 1px solid #00ff66;
+    background-color: #111822;
+}
+
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+    background-color: #21262d;
+    border: 1px solid #30363d;
+    width: 18px;
+}
+
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
+    background-color: #30363d;
 }
 
 /* --- Buton Stili (Taktik Yeşil Vurgu) --- */
@@ -88,20 +157,29 @@ QPushButton#btn_primary {
     background-color: #1a4d2e;
     color: #00ff66;
     border: 1px solid #00ff66;
-    font-size: 14px;
-    padding: 10px 16px;
+    font-size: 13px;
+    padding: 9px 16px;
 }
 
 QPushButton#btn_primary:hover {
     background-color: #22683e;
     color: #ffffff;
     border: 1px solid #39ff14;
-    box-shadow: 0px 0px 8px rgba(0, 255, 102, 0.4);
 }
 
-QPushButton#btn_primary:pressed {
-    background-color: #0f301d;
-    color: #00e676;
+QPushButton#btn_calculate {
+    background-color: #0f3e27;
+    color: #00ff66;
+    border: 1px solid #00ff66;
+    font-size: 14px;
+    padding: 10px 18px;
+    font-weight: bold;
+}
+
+QPushButton#btn_calculate:hover {
+    background-color: #1b633f;
+    color: #ffffff;
+    border: 1px solid #39ff14;
 }
 
 /* --- Çerçeve ve Bölücüler --- */
@@ -110,10 +188,11 @@ QFrame#sidebar {
     border-right: 1px solid #30363d;
 }
 
-QFrame#plot_area_container {
-    background-color: #0d1117;
+QFrame#card {
+    background-color: #161b22;
     border: 1px solid #30363d;
     border-radius: 6px;
+    padding: 10px;
 }
 
 QSplitter::handle {
@@ -138,21 +217,6 @@ QStatusBar QLabel {
     background-color: transparent;
     padding: 0 8px;
 }
-
-/* --- Kaydırma Çubuğu (Scrollbar) --- */
-QScrollBar:vertical {
-    background: #0d1117;
-    width: 8px;
-    margin: 0px;
-}
-QScrollBar::handle:vertical {
-    background: #30363d;
-    min-height: 20px;
-    border-radius: 4px;
-}
-QScrollBar::handle:vertical:hover {
-    background: #00ff66;
-}
 """
 
 
@@ -167,8 +231,8 @@ class TacticalMainWindow(QMainWindow):
     def init_ui(self):
         # 1. Ana Pencere Temel Ayarları
         self.setWindowTitle("Antigravity Taktik SDR Terminali")
-        self.resize(1280, 800)
-        self.setMinimumSize(960, 600)
+        self.resize(1340, 840)
+        self.setMinimumSize(1020, 650)
 
         # 2. Merkezi Widget ve Ana Düzen
         central_widget = QWidget(self)
@@ -186,12 +250,12 @@ class TacticalMainWindow(QMainWindow):
         sidebar_widget = self.create_sidebar()
         splitter.addWidget(sidebar_widget)
 
-        # 5. Merkezi Gösterge / Grafik Alanı
-        central_display_widget = self.create_central_display()
-        splitter.addWidget(central_display_widget)
+        # 5. Merkezi Sekme Alanı (Göstergeler ve Hesaplayıcılar)
+        central_tabs = self.create_central_tabs()
+        splitter.addWidget(central_tabs)
 
-        # Bölücü Başlangıç Oranları (%22 Kontrol, %78 Grafik)
-        splitter.setSizes([280, 1000])
+        # Bölücü Başlangıç Oranları (%22 Kontrol, %78 Çalışma Alanı)
+        splitter.setSizes([290, 1050])
 
         # 6. Alt Durum Çubuğu (Status Bar)
         self.setup_status_bar()
@@ -201,11 +265,14 @@ class TacticalMainWindow(QMainWindow):
         self.clock_timer.timeout.connect(self.update_clock)
         self.clock_timer.start(1000)
 
+        # İlk link bütçesi hesaplamasını otomatik tetikle
+        self.calculate_rf_coverage()
+
     def create_sidebar(self) -> QWidget:
         """Sol kontrol paneli bileşenlerini oluşturur."""
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setMinimumWidth(260)
+        sidebar.setMinimumWidth(270)
         sidebar.setMaximumWidth(360)
 
         layout = QVBoxLayout(sidebar)
@@ -253,16 +320,16 @@ class TacticalMainWindow(QMainWindow):
 
         layout.addWidget(sys_group)
 
-        # RF Yapılandırma Bilgi Paneli (Gelecek Aşamalar İçin Hazır Alan)
-        rf_group = QGroupBox("RF PARAMETRELERİ")
+        # RF Donanım Parametreleri
+        rf_group = QGroupBox("RF DONANIM PARAMETRELERİ")
         rf_layout = QVBoxLayout(rf_group)
         rf_layout.setSpacing(8)
 
-        lbl_freq = QLabel("Merkez Frekans: 100.000 MHz")
+        lbl_freq = QLabel("Merkez Frekans: 433.00 MHz")
         lbl_freq.setStyleSheet("color: #8b949e; font-size: 12px;")
-        lbl_gain = QLabel("Kazanç: 20 dB")
+        lbl_gain = QLabel("Donanım Kazancı: 20 dB")
         lbl_gain.setStyleSheet("color: #8b949e; font-size: 12px;")
-        lbl_sample_rate = QLabel("Örnekleme: 2.048 MS/s")
+        lbl_sample_rate = QLabel("Örnekleme Hızı: 2.048 MS/s")
         lbl_sample_rate.setStyleSheet("color: #8b949e; font-size: 12px;")
 
         rf_layout.addWidget(lbl_freq)
@@ -271,20 +338,23 @@ class TacticalMainWindow(QMainWindow):
 
         layout.addWidget(rf_group)
 
-        # Telemetri / Kayıt Özeti
-        telemetry_group = QGroupBox("SİSTEM BİLGİSİ")
-        tel_layout = QVBoxLayout(telemetry_group)
-        tel_layout.setSpacing(6)
+        # Modül Bilgi Kartı
+        module_group = QGroupBox("AKTİF MODÜLLER")
+        mod_layout = QVBoxLayout(module_group)
+        mod_layout.setSpacing(6)
 
-        lbl_engine = QLabel("Motor: PyZMQ & NumPy")
-        lbl_engine.setStyleSheet("color: #8b949e; font-size: 11px;")
-        lbl_gui_ver = QLabel("Arayüz Sürümü: v1.0.0 (Faz 2)")
-        lbl_gui_ver.setStyleSheet("color: #8b949e; font-size: 11px;")
+        lbl_m1 = QLabel("✔ Spektrum Analizörü (Hazır)")
+        lbl_m1.setStyleSheet("color: #00ff66; font-size: 11px;")
+        lbl_m2 = QLabel("✔ RF Link Bütçesi Hesaplayıcı (Aktif)")
+        lbl_m2.setStyleSheet("color: #00ff66; font-size: 11px;")
+        lbl_m3 = QLabel("✔ Friis Serbest Uzay Yayılım Modeli")
+        lbl_m3.setStyleSheet("color: #58a6ff; font-size: 11px;")
 
-        tel_layout.addWidget(lbl_engine)
-        tel_layout.addWidget(lbl_gui_ver)
+        mod_layout.addWidget(lbl_m1)
+        mod_layout.addWidget(lbl_m2)
+        mod_layout.addWidget(lbl_m3)
 
-        layout.addWidget(telemetry_group)
+        layout.addWidget(module_group)
 
         # Alt Boşluk Doldurucu
         layout.addStretch()
@@ -297,67 +367,286 @@ class TacticalMainWindow(QMainWindow):
 
         return sidebar
 
-    def create_central_display(self) -> QWidget:
-        """Merkezi grafik ve gösterge alanını oluşturur."""
-        container = QFrame()
-        container.setObjectName("plot_area_container")
+    def create_central_tabs(self) -> QWidget:
+        """Merkezi sekme yapısını ve içeriğini oluşturur."""
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setDocumentMode(True)
 
+        # 1. Sekme: RF Kapsama Alanı (Link Budget)
+        tab_rf_coverage = self.create_rf_coverage_tab()
+        self.tab_widget.addTab(tab_rf_coverage, "📊 RF Kapsama Alanı")
+
+        # 2. Sekme: Spektrum ve Şelale Göstergesi (Real-time FFT)
+        tab_spectrum = self.create_spectrum_tab()
+        self.tab_widget.addTab(tab_spectrum, "📡 Spektrum & Şelale")
+
+        return self.tab_widget
+
+    def create_rf_coverage_tab(self) -> QWidget:
+        """RF Link Bütçesi ve Kapsama Alanı Hesaplayıcı Sekmesini oluşturur."""
+        container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setSpacing(14)
 
-        # Gösterge Alanı Başlık Çubuğu
+        # 1. Başlık ve Bilgi Çubuğu
         header_bar = QHBoxLayout()
-        title = QLabel("SPEKTRUM VE ŞELALE GÖSTERGESİ")
+        title = QLabel("RF LİNK BÜTÇESİ & KAPSAMA ALANI ANALİZİ")
         title.setStyleSheet(
-            "color: #00ff66; font-size: 14px; font-weight: bold; letter-spacing: 1px;"
+            "color: #00ff66; font-size: 15px; font-weight: bold; letter-spacing: 1px;"
         )
         header_bar.addWidget(title)
         header_bar.addStretch()
 
-        mode_badge = QLabel("[ MOD: REAL-TIME FFT ]")
-        mode_badge.setStyleSheet("color: #58a6ff; font-weight: bold; font-size: 11px;")
-        header_bar.addWidget(mode_badge)
-
+        badge = QLabel("[ MODEL: FRİİS SERBEST UZAY YAYILIMI (FSPL) ]")
+        badge.setStyleSheet("color: #58a6ff; font-weight: bold; font-size: 11px;")
+        header_bar.addWidget(badge)
         layout.addLayout(header_bar)
 
-        # Gelecekteki Grafikler İçin Yer Tutucu Çerçeve (Placeholder Area)
+        # 2. Parametre Giriş Paneli (Taktik Koyu Grup)
+        input_group = QGroupBox("RF İLETİM VE ALICI PARAMETRELERİ")
+        grid = QGridLayout(input_group)
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(12)
+
+        # Frekans (MHz)
+        lbl_freq = QLabel("Frekans (MHz):")
+        self.spin_freq = QDoubleSpinBox()
+        self.spin_freq.setRange(1.0, 60000.0)
+        self.spin_freq.setValue(433.0)
+        self.spin_freq.setDecimals(2)
+        self.spin_freq.setSingleStep(10.0)
+        self.spin_freq.setToolTip("Taşıyıcı sinyalin merkez frekansı (MHz cinsinden)")
+
+        # İletim Gücü (dBm)
+        lbl_tx_power = QLabel("İletim Gücü (dBm):")
+        self.spin_tx_power = QDoubleSpinBox()
+        self.spin_tx_power.setRange(-30.0, 100.0)
+        self.spin_tx_power.setValue(20.0)
+        self.spin_tx_power.setDecimals(1)
+        self.spin_tx_power.setSingleStep(1.0)
+        self.spin_tx_power.setToolTip("Verici çıkış gücü (dBm cinsinden)")
+
+        # Tx Kazancı (dBi)
+        lbl_tx_gain = QLabel("Tx Kazancı (dBi):")
+        self.spin_tx_gain = QDoubleSpinBox()
+        self.spin_tx_gain.setRange(-20.0, 60.0)
+        self.spin_tx_gain.setValue(2.15)
+        self.spin_tx_gain.setDecimals(2)
+        self.spin_tx_gain.setSingleStep(0.5)
+        self.spin_tx_gain.setToolTip("Verici anten kazancı (dBi cinsinden)")
+
+        # Rx Kazancı (dBi)
+        lbl_rx_gain = QLabel("Rx Kazancı (dBi):")
+        self.spin_rx_gain = QDoubleSpinBox()
+        self.spin_rx_gain.setRange(-20.0, 60.0)
+        self.spin_rx_gain.setValue(2.15)
+        self.spin_rx_gain.setDecimals(2)
+        self.spin_rx_gain.setSingleStep(0.5)
+        self.spin_rx_gain.setToolTip("Alıcı anten kazancı (dBi cinsinden)")
+
+        # Hedef Mesafe (km)
+        lbl_distance = QLabel("Hedef Mesafe (km):")
+        self.spin_distance = QDoubleSpinBox()
+        self.spin_distance.setRange(0.01, 1000.0)
+        self.spin_distance.setValue(10.0)
+        self.spin_distance.setDecimals(2)
+        self.spin_distance.setSingleStep(1.0)
+        self.spin_distance.setToolTip("Analiz edilecek hedef mesafe (km cinsinden)")
+
+        # "Hesapla" Butonu
+        self.btn_calc = QPushButton("Hesapla")
+        self.btn_calc.setObjectName("btn_calculate")
+        self.btn_calc.setToolTip("Friis denklemini kullanarak RF link bütçesini ve menzil eğrisini hesaplar")
+        self.btn_calc.setCursor(Qt.PointingHandCursor)
+        self.btn_calc.clicked.connect(self.calculate_rf_coverage)
+
+        # Izgaraya Yerleştirme
+        grid.addWidget(lbl_freq, 0, 0)
+        grid.addWidget(self.spin_freq, 0, 1)
+        grid.addWidget(lbl_tx_power, 0, 2)
+        grid.addWidget(self.spin_tx_power, 0, 3)
+        grid.addWidget(lbl_tx_gain, 0, 4)
+        grid.addWidget(self.spin_tx_gain, 0, 5)
+
+        grid.addWidget(lbl_rx_gain, 1, 0)
+        grid.addWidget(self.spin_rx_gain, 1, 1)
+        grid.addWidget(lbl_distance, 1, 2)
+        grid.addWidget(self.spin_distance, 1, 3)
+        grid.addWidget(self.btn_calc, 1, 4, 1, 2)
+
+        layout.addWidget(input_group)
+
+        # 3. Sonuç Özet Kartları (HUD Göstergeleri)
+        hud_layout = QHBoxLayout()
+        hud_layout.setSpacing(12)
+
+        # Kart 1: FSPL
+        self.card_fspl_val = QLabel("-- dB")
+        card_fspl = self.create_hud_card("SERBEST UZAY KAYBI (FSPL)", self.card_fspl_val, "#f0f6fc")
+        hud_layout.addWidget(card_fspl)
+
+        # Kart 2: Alınan Güç (Prx)
+        self.card_prx_val = QLabel("-- dBm")
+        card_prx = self.create_hud_card("HEDEF ALINAN GÜÇ (Prx)", self.card_prx_val, "#00ff66")
+        hud_layout.addWidget(card_prx)
+
+        # Kart 3: EIRP
+        self.card_eirp_val = QLabel("-- dBm")
+        card_eirp = self.create_hud_card("EIRP (IŞIMA GÜCÜ)", self.card_eirp_val, "#58a6ff")
+        hud_layout.addWidget(card_eirp)
+
+        # Kart 4: Sinyal Durumu
+        self.card_status_val = QLabel("HESAPLANIYOR")
+        card_status = self.create_hud_card("BAĞLANTI KALİTESİ", self.card_status_val, "#00ff66")
+        hud_layout.addWidget(card_status)
+
+        layout.addLayout(hud_layout)
+
+        # 4. PyQtGraph Alınan Güç - Mesafe Grafiği
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setBackground("#090d13")
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_widget.setLabel("left", "Alınan Güç", units="dBm", color="#c9d1d9")
+        self.plot_widget.setLabel("bottom", "Mesafe", units="km", color="#c9d1d9")
+        self.plot_widget.setTitle(
+            '<span style="color: #00ff66; font-size: 13px; font-weight: bold;">'
+            "Alınan Güç - Mesafe Eğrisi (Friis İletim Modeli)</span>"
+        )
+        self.plot_widget.addLegend(offset=(20, 20), labelTextColor="#c9d1d9")
+
+        # Eğriler ve Çizgiler
+        self.curve_rx = self.plot_widget.plot(
+            pen=pg.mkPen(color="#00ff66", width=2.5),
+            name="Alınan Güç Eğrisi (Prx)"
+        )
+        self.point_target = self.plot_widget.plot(
+            pen=None,
+            symbol="o",
+            symbolSize=10,
+            symbolBrush=pg.mkBrush("#ff4d4f"),
+            name="Hedef Mesafe Noktası"
+        )
+        # Hassasiyet Eşiği Çizgisi (-100 dBm)
+        self.line_threshold = self.plot_widget.plot(
+            pen=pg.mkPen(color="#ffaa00", width=1.5, style=Qt.DashLine),
+            name="Referans Hassasiyet Eşiği (-100 dBm)"
+        )
+
+        layout.addWidget(self.plot_widget, stretch=1)
+
+        return container
+
+    def create_hud_card(self, title_text: str, value_label: QLabel, val_color: str) -> QFrame:
+        """HUD metrik kartı oluşturur."""
+        frame = QFrame()
+        frame.setObjectName("card")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(4)
+
+        lbl_title = QLabel(title_text)
+        lbl_title.setStyleSheet("color: #8b949e; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;")
+
+        value_label.setStyleSheet(f"color: {val_color}; font-size: 16px; font-weight: bold; font-family: Consolas;")
+
+        layout.addWidget(lbl_title)
+        layout.addWidget(value_label)
+        return frame
+
+    def create_spectrum_tab(self) -> QWidget:
+        """Spektrum ve Şelale Gösterge Sekmesini oluşturur (Gelecek Aşamalar İçin)."""
+        container = QFrame()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        header_bar = QHBoxLayout()
+        title = QLabel("GERÇEK ZAMANLI SPEKTRUM VE ŞELALE (FFT)")
+        title.setStyleSheet("color: #00ff66; font-size: 15px; font-weight: bold; letter-spacing: 1px;")
+        header_bar.addWidget(title)
+        header_bar.addStretch()
+
+        badge = QLabel("[ DURUM: BEKLEMEDE ]")
+        badge.setStyleSheet("color: #ffaa00; font-weight: bold; font-size: 11px;")
+        header_bar.addWidget(badge)
+        layout.addLayout(header_bar)
+
         placeholder_frame = QFrame()
         placeholder_frame.setStyleSheet(
-            """
-            QFrame {
-                background-color: #090d13;
-                border: 1px dashed #30363d;
-                border-radius: 8px;
-            }
-            """
+            "background-color: #090d13; border: 1px dashed #30363d; border-radius: 8px;"
         )
-        placeholder_layout = QVBoxLayout(placeholder_frame)
-        placeholder_layout.setAlignment(Qt.AlignCenter)
+        p_layout = QVBoxLayout(placeholder_frame)
+        p_layout.setAlignment(Qt.AlignCenter)
 
         icon_label = QLabel("📡")
         icon_label.setStyleSheet("font-size: 48px; background: transparent;")
         icon_label.setAlignment(Qt.AlignCenter)
 
-        info_title = QLabel("GRAFİK VE SPEKTRUM GÖSTERGE ALANI")
-        info_title.setStyleSheet(
-            "color: #f0f6fc; font-size: 16px; font-weight: bold; background: transparent;"
-        )
+        info_title = QLabel("SPEKTRUM ANALİZÖRÜ VE ŞELALE EKRANI")
+        info_title.setStyleSheet("color: #f0f6fc; font-size: 16px; font-weight: bold; background: transparent;")
         info_title.setAlignment(Qt.AlignCenter)
 
         info_desc = QLabel(
-            "Bu alan Faz 3 ve Faz 4 kapsamında PyQtGraph spektrum analizörü ve şelale (waterfall) göstergesi ile donatılacaktır."
+            "ZMQ ve SDR veri akışı entegrasyonu tamamlandığında canlı FFT spektrumu ve şelale grafiği burada akacaktır."
         )
         info_desc.setStyleSheet("color: #8b949e; font-size: 12px; background: transparent;")
         info_desc.setAlignment(Qt.AlignCenter)
 
-        placeholder_layout.addWidget(icon_label)
-        placeholder_layout.addWidget(info_title)
-        placeholder_layout.addWidget(info_desc)
+        p_layout.addWidget(icon_label)
+        p_layout.addWidget(info_title)
+        p_layout.addWidget(info_desc)
 
         layout.addWidget(placeholder_frame)
-
         return container
+
+    def calculate_rf_coverage(self):
+        """Kullanıcı girişlerine göre Friis Link Bütçesini hesaplar ve grafiği günceller."""
+        freq_mhz = self.spin_freq.value()
+        tx_power_dbm = self.spin_tx_power.value()
+        tx_gain_dbi = self.spin_tx_gain.value()
+        rx_gain_dbi = self.spin_rx_gain.value()
+        target_dist_km = self.spin_distance.value()
+
+        # Link bütçesini hesapla
+        results = compute_link_budget(
+            frequency_mhz=freq_mhz,
+            tx_power_dbm=tx_power_dbm,
+            tx_gain_dbi=tx_gain_dbi,
+            rx_gain_dbi=rx_gain_dbi,
+            target_distance_km=target_dist_km,
+        )
+
+        distances = results["distances"]
+        rx_powers = results["rx_powers"]
+        target_fspl = results["target_fspl"]
+        target_rx = results["target_rx_power"]
+        eirp = results["eirp_dbm"]
+        quality_text = results["quality_text"]
+        quality_color = results["quality_color"]
+
+        # Kartları güncelle
+        self.card_fspl_val.setText(f"{target_fspl:.2f} dB")
+        self.card_prx_val.setText(f"{target_rx:.2f} dBm")
+        self.card_eirp_val.setText(f"{eirp:.2f} dBm")
+        self.card_status_val.setText(quality_text)
+        self.card_status_val.setStyleSheet(
+            f"color: {quality_color}; font-size: 15px; font-weight: bold; font-family: Consolas;"
+        )
+
+        # Grafiği güncelle
+        self.curve_rx.setData(distances, rx_powers)
+        self.point_target.setData([target_dist_km], [target_rx])
+
+        # Hassasiyet eşiği çizgisini güncelle
+        threshold_y = np.full_like(distances, -100.0)
+        self.line_threshold.setData(distances, threshold_y)
+
+        # Durum çubuğunu güncelle
+        self.status_msg.setText(
+            f"Link Bütçesi Hesaplandı (f={freq_mhz:.1f} MHz, d={target_dist_km:.2f} km, Prx={target_rx:.2f} dBm)"
+        )
+        self.freq_badge.setText(f"Frekans: {freq_mhz:.2f} MHz")
 
     def setup_status_bar(self):
         """Alt taktik durum çubuğunu yapılandırır."""
@@ -366,7 +655,7 @@ class TacticalMainWindow(QMainWindow):
         self.status_msg = QLabel("Hazır")
         self.status_msg.setStyleSheet("color: #00ff66; font-weight: bold;")
 
-        self.freq_badge = QLabel("Frekans: 100.00 MHz")
+        self.freq_badge = QLabel("Frekans: 433.00 MHz")
         self.freq_badge.setStyleSheet("color: #8b949e;")
 
         self.clock_label = QLabel(QTime.currentTime().toString("HH:mm:ss"))
