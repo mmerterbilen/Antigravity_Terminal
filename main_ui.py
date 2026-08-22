@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Antigravity Taktik SDR Terminali - Ana Kullanıcı Arayüzü (Main UI)
-Gerçek zamanlı FFT Spektrum Analizörü, RF Link Bütçesi ve ZeroMQ Middleware Entegrasyonu.
+Gerçek Zamanlı Spektrum Analizörü (FFT), Şelale (Waterfall/Spektrogram) Göstergesi,
+RF Link Bütçesi Hesaplayıcı ve ZeroMQ Middleware Entegrasyonu.
 """
 
 import sys
@@ -10,7 +11,7 @@ import time
 import numpy as np
 import pyqtgraph as pg
 import zmq
-from PyQt5.QtCore import Qt, QTimer, QTime
+from PyQt5.QtCore import QRectF, Qt, QTimer, QTime
 from PyQt5.QtGui import QColor, QFont, QIcon, QPalette, QPen
 from PyQt5.QtWidgets import (
     QApplication,
@@ -215,6 +216,7 @@ QFrame#card {
 QSplitter::handle {
     background-color: #30363d;
     width: 2px;
+    height: 2px;
 }
 
 QSplitter::handle:hover {
@@ -237,6 +239,19 @@ QStatusBar QLabel {
 """
 
 
+def create_tactical_colormap():
+    """Taktik Koyu Tema için yüksek kontrastlı LUT renk haritası oluşturur."""
+    pos = np.array([0.0, 0.25, 0.55, 0.8, 1.0])
+    colors = np.array([
+        [9, 13, 19, 255],     # Zemin Koyu Gri/Siyah
+        [15, 62, 39, 255],    # Koyu Taktik Zümrüt Yeşili
+        [0, 230, 118, 255],   # Canlı Taktik Yeşil
+        [88, 166, 255, 255],  # Elektrik Camgöbeği (Cyan)
+        [255, 255, 255, 255], # Parlak Beyaz (En Yüksek Tepe)
+    ], dtype=np.ubyte)
+    return pg.ColorMap(pos, colors)
+
+
 class TacticalMainWindow(QMainWindow):
     """Antigravity Taktik SDR Terminali Ana Pencere Sınıfı."""
 
@@ -248,9 +263,13 @@ class TacticalMainWindow(QMainWindow):
         self.sample_rate = 2.048e6  # 2.048 MHz örnekleme
         self.center_freq_mhz = 433.0
         self.fft_size = 1024
+        self.history_depth = 150    # Şelale derinliği (satır sayısı)
         self.total_frames_received = 0
         self.last_fps_time = time.time()
         self.fps_counter = 0
+
+        # Şelale 2D Tamponu: (Frekans, Zaman Geçmişi)
+        self.waterfall_data = np.full((self.fft_size, self.history_depth), -115.0, dtype=np.float32)
 
         # ZeroMQ Middleware Başlatma
         self.zmq_pub = None
@@ -276,8 +295,8 @@ class TacticalMainWindow(QMainWindow):
     def init_ui(self):
         # 1. Ana Pencere Temel Ayarları
         self.setWindowTitle("Antigravity Taktik SDR Terminali")
-        self.resize(1360, 860)
-        self.setMinimumSize(1040, 660)
+        self.resize(1380, 880)
+        self.setMinimumSize(1060, 680)
 
         # 2. Merkezi Widget ve Ana Düzen
         central_widget = QWidget(self)
@@ -300,7 +319,7 @@ class TacticalMainWindow(QMainWindow):
         splitter.addWidget(central_tabs)
 
         # Bölücü Başlangıç Oranları (%22 Kontrol, %78 Çalışma Alanı)
-        splitter.setSizes([290, 1070])
+        splitter.setSizes([290, 1090])
 
         # 6. Alt Durum Çubuğu (Status Bar)
         self.setup_status_bar()
@@ -396,7 +415,7 @@ class TacticalMainWindow(QMainWindow):
         mod_layout = QVBoxLayout(module_group)
         mod_layout.setSpacing(6)
 
-        lbl_m1 = QLabel("✔ Gerçek Zamanlı Spektrum (Aktif)")
+        lbl_m1 = QLabel("✔ Spektrum Analizörü & Şelale (Aktif)")
         lbl_m1.setStyleSheet("color: #00ff66; font-size: 11px;")
         lbl_m2 = QLabel("✔ RF Link Bütçesi Hesaplayıcı")
         lbl_m2.setStyleSheet("color: #00ff66; font-size: 11px;")
@@ -425,9 +444,9 @@ class TacticalMainWindow(QMainWindow):
         self.tab_widget = QTabWidget()
         self.tab_widget.setDocumentMode(True)
 
-        # 1. Sekme: Gerçek Zamanlı Spektrum Analizörü (Phase 6)
-        tab_spectrum = self.create_spectrum_tab()
-        self.tab_widget.addTab(tab_spectrum, "📡 Spektrum Analizörü")
+        # 1. Sekme: Spektrum ve Şelale Ekranı (Phase 6 & 7)
+        tab_spectrum_waterfall = self.create_spectrum_waterfall_tab()
+        self.tab_widget.addTab(tab_spectrum_waterfall, "📡 Spektrum & Şelale")
 
         # 2. Sekme: RF Kapsama Alanı (Link Budget)
         tab_rf_coverage = self.create_rf_coverage_tab()
@@ -435,16 +454,16 @@ class TacticalMainWindow(QMainWindow):
 
         return self.tab_widget
 
-    def create_spectrum_tab(self) -> QWidget:
-        """Gerçek Zamanlı FFT Spektrum Analizörü Sekmesini oluşturur."""
+    def create_spectrum_waterfall_tab(self) -> QWidget:
+        """Gerçek Zamanlı FFT Spektrum Analizörü ve Şelale Ekranını oluşturur."""
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         # 1. Başlık ve Telemetri Çubuğu
         header_bar = QHBoxLayout()
-        title = QLabel("GERÇEK ZAMANLI SPEKTRUM ANALİZÖRÜ (FFT)")
+        title = QLabel("GERÇEK ZAMANLI SPEKTRUM & ŞELALE GÖSTERGESİ")
         title.setStyleSheet(
             "color: #00ff66; font-size: 15px; font-weight: bold; letter-spacing: 1px;"
         )
@@ -479,44 +498,67 @@ class TacticalMainWindow(QMainWindow):
 
         layout.addLayout(hud_layout)
 
-        # 3. PyQtGraph Spektrum Analizör Grafiği
+        # 3. Dikey Bölücü (Splitter): Üstte Spektrum Analizörü, Altta Şelale Ekranı
+        display_splitter = QSplitter(Qt.Vertical)
+        display_splitter.setChildrenCollapsible(False)
+
+        # 3A. PyQtGraph Spektrum Analizör Grafiği (Üst Panel)
         self.spectrum_plot = pg.PlotWidget()
         self.spectrum_plot.setBackground("#090d13")
         self.spectrum_plot.showGrid(x=True, y=True, alpha=0.3)
-
-        # X ve Y Eksen Etiketleri (Türkçe)
-        self.spectrum_plot.setLabel("left", "Genlik", units="dB", color="#c9d1d9")
+        self.spectrum_plot.setLabel("left", "Genlik (dB)", color="#c9d1d9")
         self.spectrum_plot.setLabel("bottom", "Frekans (Bant)", units="MHz", color="#c9d1d9")
-
-        # Grafik Başlığı
         self.spectrum_plot.setTitle(
-            '<span style="color: #00ff66; font-size: 13px; font-weight: bold;">'
+            '<span style="color: #00ff66; font-size: 12px; font-weight: bold;">'
             "Gerçek Zamanlı Spektrum Analizi</span>"
         )
         self.spectrum_plot.setYRange(-120, 10, padding=0.02)
 
-        # Spektrum Çizgisi (Taktik Yeşil)
         self.spectrum_curve = self.spectrum_plot.plot(
             pen=pg.mkPen(color="#00ff66", width=1.8),
             name="Anlık Spektrum"
         )
-
-        # Tepe Tepe Maksimum Tutma Çizgisi (Max-Hold Cyan)
         self.max_hold_curve = self.spectrum_plot.plot(
             pen=pg.mkPen(color="#388bfd", width=1.2, style=Qt.DashLine),
             name="Tepe Tutma (Max-Hold)"
         )
         self.max_hold_data = None
 
-        # Başlangıç boş eğrisi
-        freq_axis_initial = np.linspace(
-            -self.sample_rate / (2 * 1e6),
-            self.sample_rate / (2 * 1e6),
-            self.fft_size,
-        )
-        self.spectrum_curve.setData(freq_axis_initial, np.full(self.fft_size, -100.0))
+        display_splitter.addWidget(self.spectrum_plot)
 
-        layout.addWidget(self.spectrum_plot, stretch=1)
+        # 3B. PyQtGraph Şelale (Waterfall / Spektrogram) Grafiği (Alt Panel)
+        self.waterfall_plot = pg.PlotWidget()
+        self.waterfall_plot.setBackground("#090d13")
+        self.waterfall_plot.setLabel("left", "Zaman", color="#c9d1d9")
+        self.waterfall_plot.setLabel("bottom", "Frekans", units="MHz", color="#c9d1d9")
+        self.waterfall_plot.setTitle(
+            '<span style="color: #00ff66; font-size: 12px; font-weight: bold;">'
+            "Şelale Ekranı (Zaman Geçmişi)</span>"
+        )
+
+        # Frekans eksenlerini senkronize bağla (X-Link)
+        self.waterfall_plot.setXLink(self.spectrum_plot)
+
+        # 2D Waterfall Görüntü Öğesi (ImageItem)
+        self.waterfall_img = pg.ImageItem()
+        self.waterfall_plot.addItem(self.waterfall_img)
+
+        # Taktik Renk Haritasını (LUT) Uygula
+        tactical_cmap = create_tactical_colormap()
+        lut = tactical_cmap.getLookupTable(0.0, 1.0, 256)
+        self.waterfall_img.setLookupTable(lut)
+
+        # Başlangıç Boyutlandırma ve Sınırları
+        half_bw_mhz = (self.sample_rate / 2.0) / 1e6
+        self.waterfall_img.setRect(QRectF(-half_bw_mhz, 0, 2.0 * half_bw_mhz, self.history_depth))
+        self.waterfall_img.setImage(self.waterfall_data, autoLevels=False, levels=[-110.0, -25.0])
+
+        display_splitter.addWidget(self.waterfall_plot)
+
+        # Dikey Bölücü Oranları (%50 Spektrum, %50 Şelale)
+        display_splitter.setSizes([360, 360])
+
+        layout.addWidget(display_splitter, stretch=1)
 
         return container
 
@@ -693,7 +735,7 @@ class TacticalMainWindow(QMainWindow):
         return frame
 
     def process_incoming_dsp_data(self):
-        """ZMQ üzerinden gelen I/Q verilerini okur, FFT hesaplar ve grafiği günceller."""
+        """ZMQ üzerinden gelen I/Q verilerini okur, FFT hesaplar ve Spektrum ile Şelaleyi günceller."""
         if not self.zmq_sub:
             return
 
@@ -739,7 +781,16 @@ class TacticalMainWindow(QMainWindow):
                 self.max_hold_data = np.maximum(self.max_hold_data * 0.995, magnitude_db)
             self.max_hold_curve.setData(freq_axis, self.max_hold_data)
 
-            # 7. Tepe Frekans ve Güç Analizi
+            # 7. Şelale (Waterfall) 2D Verisini Kaydır ve Güncelle
+            if self.waterfall_data.shape[0] != N:
+                self.waterfall_data = np.full((N, self.history_depth), -115.0, dtype=np.float32)
+                self.waterfall_img.setRect(QRectF(-half_bw_mhz, 0, 2.0 * half_bw_mhz, self.history_depth))
+
+            self.waterfall_data = np.roll(self.waterfall_data, 1, axis=1)
+            self.waterfall_data[:, 0] = magnitude_db.astype(np.float32)
+            self.waterfall_img.setImage(self.waterfall_data, autoLevels=False, levels=[-110.0, -25.0])
+
+            # 8. Tepe Frekans ve Güç Analizi
             peak_idx = int(np.argmax(magnitude_db))
             peak_freq_khz = freq_axis[peak_idx] * 1000.0
             peak_pwr = magnitude_db[peak_idx]
@@ -811,7 +862,6 @@ class TacticalMainWindow(QMainWindow):
 
     def perform_zmq_ping_test(self):
         """ZeroMQ PUB/SUB köprüsünü test eder ve sonucu konsola ile arayüze yansıtır."""
-        # Geçici bağımsız test soketi ile test yap
         success, detail = execute_ping_test(
             address="tcp://127.0.0.1:5555",
         )
@@ -866,7 +916,7 @@ class TacticalMainWindow(QMainWindow):
             self.lbl_system_status.setStyleSheet(
                 "color: #00ff66; font-weight: bold; font-size: 11px; padding: 4px;"
             )
-            self.status_msg.setText("Sistem Aktif - ZMQ Spektrum Alımı Başlatıldı")
+            self.status_msg.setText("Sistem Aktif - ZMQ Spektrum & Şelale Alımı Başlatıldı")
             self.status_msg.setStyleSheet("color: #00ff66; font-weight: bold;")
             
             # FFT alım zamanlayıcısını başlat (~33 FPS)
