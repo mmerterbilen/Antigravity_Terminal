@@ -3,7 +3,8 @@
 """
 Antigravity Taktik SDR Terminali - Ana Kullanıcı Arayüzü (Main UI)
 Çoklu İş Parçacıklı (QThread) Spektrum & Şelale Göstergesi, AM/FM/NBFM Yazılımsal Demodülasyon,
-Dijital Telemetri Çözücü, Ses Çıkışı, I/Q Sinyal Kayıt/Oynatma ve RF Link Bütçesi Hesaplayıcı.
+Dijital Telemetri Çözücü, Ses Çıkışı, I/Q Sinyal Kayıt/Oynatma, RF Link Bütçesi Hesaplayıcı ve
+Dahili İnteraktif Eğitim & Sistem Rehberi (User Manual).
 """
 
 import os
@@ -34,6 +35,7 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QStatusBar,
     QTabWidget,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -48,6 +50,7 @@ from demodulator import (
 )
 from rf_calculator import compute_link_budget
 from signal_recorder import IQPlaybackThread, IQRecorder
+from user_manual import get_user_manual_html
 from zmq_manager import ZMQPublisher, ZMQSubscriber, execute_ping_test
 
 
@@ -120,18 +123,23 @@ QGroupBox::title {
     font-size: 11px;
 }
 
-/* --- Taktik Log Konsolu & Decoder (QTextEdit) --- */
-QTextEdit#console_log, QTextEdit#decoder_log {
+/* --- Taktik Log Konsolu, Dekoder & Rehber (QTextEdit / QTextBrowser) --- */
+QTextEdit#console_log, QTextEdit#decoder_log, QTextBrowser#system_manual {
     background-color: #080b10;
     color: #c9d1d9;
     border: 1px solid #30363d;
     border-radius: 6px;
-    font-family: "Consolas", "Courier New", monospace;
-    font-size: 12px;
-    line-height: 1.4;
-    padding: 8px;
+    font-family: "Segoe UI", "Consolas", "Roboto", sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 10px;
     selection-background-color: #1f3a29;
     selection-color: #00ff66;
+}
+
+QTextEdit#console_log, QTextEdit#decoder_log {
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 12px;
 }
 
 /* --- Girdi Kutuları & Açılır Liste --- */
@@ -319,11 +327,11 @@ def create_tactical_colormap():
     """Taktik Koyu Tema için yüksek kontrastlı LUT renk haritası oluşturur."""
     pos = np.array([0.0, 0.25, 0.55, 0.8, 1.0])
     colors = np.array([
-        [9, 13, 19, 255],     # Zemin Koyu Gri/Siyah
-        [15, 62, 39, 255],    # Koyu Taktik Zümrüt Yeşili
-        [0, 230, 118, 255],   # Canlı Taktik Yeşil
-        [88, 166, 255, 255],  # Elektrik Camgöbeği (Cyan)
-        [255, 255, 255, 255], # Parlak Beyaz (En Yüksek Tepe)
+        [9, 13, 19, 255],
+        [15, 62, 39, 255],
+        [0, 230, 118, 255],
+        [88, 166, 255, 255],
+        [255, 255, 255, 255],
     ], dtype=np.ubyte)
     return pg.ColorMap(pos, colors)
 
@@ -334,11 +342,10 @@ class DSPWorkerThread(QThread):
     hesaplayan, canlı I/Q kaydını dosyaya yazan optimize edilmiş çoklu iş parçacığı.
     """
 
-    # Sinyaller
     spectrum_ready = pyqtSignal(np.ndarray, np.ndarray, float, float, float, int)
-    demod_audio_ready = pyqtSignal(np.ndarray, float)  # (audio_samples, power_db)
-    digital_payload_ready = pyqtSignal(dict)           # (decoded_frame_dict)
-    record_stats_signal = pyqtSignal(int, int, float)  # (samples, frames, size_mb)
+    demod_audio_ready = pyqtSignal(np.ndarray, float)
+    digital_payload_ready = pyqtSignal(dict)
+    record_stats_signal = pyqtSignal(int, int, float)
     log_signal = pyqtSignal(str, str)
 
     def __init__(self, address: str = "tcp://127.0.0.1:5555", sample_rate: float = 2.048e6):
@@ -351,14 +358,12 @@ class DSPWorkerThread(QThread):
         self.recorder = IQRecorder(output_dir="records")
         self.decoder = DigitalDecoder()
 
-        # Demodülasyon Parametreleri
-        self.demod_mode = "OFF"  # "OFF", "AM", "FM", "NBFM"
+        self.demod_mode = "OFF"
         self.squelch_db = -80.0
         self.volume = 1.0
         self.frame_index = 0
 
     def run(self):
-        """İş parçacığı ana döngüsü."""
         self._running = True
         ctx = zmq.Context()
         sub = ZMQSubscriber(address=self.address, topics=["IQ", ""], context=ctx)
@@ -388,7 +393,6 @@ class DSPWorkerThread(QThread):
                         N = len(latest_iq)
                         self.frame_index += 1
 
-                        # 1. Hanning Penceresi ve FFT
                         if N not in self.window_cache:
                             self.window_cache[N] = np.hanning(N)
                         window = self.window_cache[N]
@@ -417,7 +421,6 @@ class DSPWorkerThread(QThread):
                             N,
                         )
 
-                        # 2. Yazılımsal Demodülasyon (AM / FM / NBFM)
                         if self.demod_mode != "OFF":
                             if self.demod_mode == "AM":
                                 audio, pwr_db = demodulate_am(
@@ -427,19 +430,17 @@ class DSPWorkerThread(QThread):
                                 audio, pwr_db = demodulate_nbfm(
                                     latest_iq, squelch_db=self.squelch_db, volume=self.volume
                                 )
-                            else:  # FM
+                            else:
                                 audio, pwr_db = demodulate_fm(
                                     latest_iq, squelch_db=self.squelch_db, volume=self.volume
                                 )
 
                             self.demod_audio_ready.emit(audio, pwr_db)
 
-                        # 3. Dijital Taktik Telemetri Çözümleme
                         decoded_pkt = self.decoder.decode_frame(latest_iq, self.frame_index)
                         if decoded_pkt:
                             self.digital_payload_ready.emit(decoded_pkt)
 
-                        # 4. Kayıt İstatistikleri
                         if self.recorder.is_recording:
                             stats = self.recorder.get_stats()
                             self.record_stats_signal.emit(
@@ -456,7 +457,6 @@ class DSPWorkerThread(QThread):
             self.log_signal.emit("BİLGİ", "Arka plan DSP iş parçacığı güvenle kapatıldı.")
 
     def set_demod_config(self, mode: str, squelch_db: float, volume: float):
-        """Demodülasyon yapılandırmasını günceller."""
         self.demod_mode = mode
         self.squelch_db = squelch_db
         self.volume = volume
@@ -495,7 +495,6 @@ class TacticalMainWindow(QMainWindow):
         self.is_playing = False
         self.audio_output_enabled = False
 
-        # DSP & FFT Parametreleri
         self.sample_rate = 2.048e6
         self.center_freq_mhz = 433.0
         self.fft_size = 1024
@@ -504,22 +503,17 @@ class TacticalMainWindow(QMainWindow):
         self.last_fps_time = time.time()
         self.fps_counter = 0
 
-        # Şelale 2D Tamponu
         self.waterfall_data = np.full((self.fft_size, self.history_depth), -115.0, dtype=np.float32)
 
-        # Oynatma İş Parçacığı & Ses Motoru
         self.playback_thread: Optional[IQPlaybackThread] = None
         self.selected_playback_filepath = ""
         self.audio_engine = TacticalAudioOutput(sample_rate=8000)
 
-        # ZeroMQ PUB (Ping Testi)
         self.zmq_pub = None
         self.init_zmq()
 
-        # Arayüzü Kur
         self.init_ui()
 
-        # Optimize Edilmiş Çoklu İş Parçacığı (QThread) Motoru
         self.dsp_worker = DSPWorkerThread(address="tcp://127.0.0.1:5555", sample_rate=self.sample_rate)
         self.dsp_worker.center_freq_mhz = self.center_freq_mhz
         self.dsp_worker.spectrum_ready.connect(self.on_spectrum_data_ready)
@@ -528,11 +522,9 @@ class TacticalMainWindow(QMainWindow):
         self.dsp_worker.record_stats_signal.connect(self.on_record_stats_update)
         self.dsp_worker.log_signal.connect(self.log_message)
 
-        # Başlangıç Loglarını Konsola İlet
-        self.log_message("SYSTEM", "Antigravity Taktik SDR Terminali başlatıldı (Faz 12 - Demodülasyon & Çözücü Aktif).")
-        self.log_message("INFO", "Taktik GUI, AM/FM Demodülatör ve Dijital Telemetri motoru hazır.")
+        self.log_message("SYSTEM", "Antigravity Taktik SDR Terminali başlatıldı (Faz 13 - Sistem Rehberi Eklendi).")
+        self.log_message("INFO", "Taktik GUI ve Dahili Eğitim Kılavuzu yüklendi.")
 
-        # İlk link bütçesi hesaplamasını otomatik tetikle
         self.calculate_rf_coverage()
 
     def init_zmq(self):
@@ -585,7 +577,6 @@ class TacticalMainWindow(QMainWindow):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(12)
 
-        # Başlık
         header_layout = QVBoxLayout()
         header_title = QLabel("KONTROL PANELİ")
         header_title.setStyleSheet(
@@ -714,19 +705,22 @@ class TacticalMainWindow(QMainWindow):
         mod_layout = QVBoxLayout(module_group)
         mod_layout.setSpacing(5)
 
-        lbl_m1 = QLabel("✔ AM / FM / NBFM Demodülatör")
+        lbl_m1 = QLabel("✔ Sistem Kullanım Kılavuzu")
         lbl_m1.setStyleSheet("color: #00ff66; font-size: 11px;")
-        lbl_m2 = QLabel("✔ Dijital Telemetri Çözücü")
+        lbl_m2 = QLabel("✔ AM / FM / NBFM Demodülatör")
         lbl_m2.setStyleSheet("color: #00ff66; font-size: 11px;")
-        lbl_m3 = QLabel("✔ I/Q Kayıt & Oynatma")
+        lbl_m3 = QLabel("✔ Dijital Telemetri Çözücü")
         lbl_m3.setStyleSheet("color: #00ff66; font-size: 11px;")
-        lbl_m4 = QLabel("✔ Spektrum & Şelale Göstergesi")
+        lbl_m4 = QLabel("✔ I/Q Kayıt & Oynatma")
         lbl_m4.setStyleSheet("color: #00ff66; font-size: 11px;")
+        lbl_m5 = QLabel("✔ Spektrum & Şelale Göstergesi")
+        lbl_m5.setStyleSheet("color: #00ff66; font-size: 11px;")
 
         mod_layout.addWidget(lbl_m1)
         mod_layout.addWidget(lbl_m2)
         mod_layout.addWidget(lbl_m3)
         mod_layout.addWidget(lbl_m4)
+        mod_layout.addWidget(lbl_m5)
 
         layout.addWidget(module_group)
 
@@ -749,7 +743,7 @@ class TacticalMainWindow(QMainWindow):
         self.right_splitter = QSplitter(Qt.Vertical)
         self.right_splitter.setChildrenCollapsible(False)
 
-        # 1. Merkezi Sekme Alanı (3 Sekme)
+        # 1. Merkezi Sekme Alanı (4 Sekme)
         self.tab_widget = QTabWidget()
         self.tab_widget.setDocumentMode(True)
 
@@ -762,6 +756,9 @@ class TacticalMainWindow(QMainWindow):
         tab_rf_coverage = self.create_rf_coverage_tab()
         self.tab_widget.addTab(tab_rf_coverage, "📊 RF Kapsama Alanı")
 
+        tab_manual = self.create_manual_tab()
+        self.tab_widget.addTab(tab_manual, "📖 Eğitim & Sistem Rehberi")
+
         self.right_splitter.addWidget(self.tab_widget)
 
         # 2. Sistem Logları Konsol Paneli
@@ -773,14 +770,41 @@ class TacticalMainWindow(QMainWindow):
         layout.addWidget(self.right_splitter)
         return right_container
 
+    def create_manual_tab(self) -> QWidget:
+        """Dahili Eğitim & Sistem Kullanım Kılavuzu Sekmesini (QTextBrowser) oluşturur."""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        header_bar = QHBoxLayout()
+        title = QLabel("DAHİLİ EĞİTİM & SİSTEM KULLANIM REHBERİ")
+        title.setStyleSheet(
+            "color: #00ff66; font-size: 15px; font-weight: bold; letter-spacing: 1px;"
+        )
+        header_bar.addWidget(title)
+        header_bar.addStretch()
+
+        badge = QLabel("[ KAPSAMLI KILAVUZ & DOKÜMANTASYON ]")
+        badge.setStyleSheet("color: #58a6ff; font-weight: bold; font-size: 11px;")
+        header_bar.addWidget(badge)
+        layout.addLayout(header_bar)
+
+        # QTextBrowser ile zengin HTML dokümantasyonu
+        self.txt_manual = QTextBrowser()
+        self.txt_manual.setObjectName("system_manual")
+        self.txt_manual.setOpenExternalLinks(False)
+        self.txt_manual.setHtml(get_user_manual_html())
+        layout.addWidget(self.txt_manual, stretch=1)
+
+        return container
+
     def create_demodulation_tab(self) -> QWidget:
-        """Yazılımsal Demodülasyon (AM/FM/NBFM) ve Dijital Çözücü Sekmesini oluşturur."""
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        # 1. Başlık Çubuğu
         header_bar = QHBoxLayout()
         title = QLabel("YAZILIMSAL DEMODÜLASYON & DİJİTAL SİNYAL ÇÖZÜCÜ")
         title.setStyleSheet(
@@ -794,20 +818,17 @@ class TacticalMainWindow(QMainWindow):
         header_bar.addWidget(self.lbl_demod_badge)
         layout.addLayout(header_bar)
 
-        # 2. Demodülasyon & Ses Kontrol Paneli
         ctrl_group = QGroupBox("DEMODÜLASYON VE SES KONTROLÜ")
         grid = QGridLayout(ctrl_group)
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(10)
 
-        # Demodülasyon Modu Seçici
         lbl_mode = QLabel("Demodülasyon Modu:")
         self.cmb_demod_mode = QComboBox()
         self.cmb_demod_mode.addItems(["KAPALI (Off)", "AM Alıcısı", "FM Alıcısı", "NBFM (Dar Bant FM)"])
         self.cmb_demod_mode.currentIndexChanged.connect(self.on_demod_config_changed)
         self.cmb_demod_mode.setToolTip("Yazılımsal demodülasyon algoritmasını seçer")
 
-        # Susturma (Squelch) Ayarı
         lbl_squelch = QLabel("Susturma (Squelch):")
         self.spin_squelch = QDoubleSpinBox()
         self.spin_squelch.setRange(-120.0, 0.0)
@@ -818,7 +839,6 @@ class TacticalMainWindow(QMainWindow):
         self.spin_squelch.setToolTip("Bu eşiğin altındaki sinyaller susturulur (Squelch)")
         self.spin_squelch.valueChanged.connect(self.on_demod_config_changed)
 
-        # Ses Seviyesi (Volume)
         lbl_vol = QLabel("Ses Seviyesi:")
         self.spin_volume = QDoubleSpinBox()
         self.spin_volume.setRange(0.0, 200.0)
@@ -829,7 +849,6 @@ class TacticalMainWindow(QMainWindow):
         self.spin_volume.setToolTip("Demodüle edilmiş ses çıkış kazancı")
         self.spin_volume.valueChanged.connect(self.on_demod_config_changed)
 
-        # "Sesi Başlat" / "Sesi Kapat" Butonu
         self.btn_audio = QPushButton("Sesi Başlat")
         self.btn_audio.setObjectName("btn_audio_active")
         self.btn_audio.setToolTip("Demodüle edilen sesi hoparlöre aktarır")
@@ -846,11 +865,9 @@ class TacticalMainWindow(QMainWindow):
 
         layout.addWidget(ctrl_group)
 
-        # 3. İki Bölümlü Alt Alan (Üstte Ses Dalga Şekli, Altta Dijital Telemetri Çözücü)
         demod_splitter = QSplitter(Qt.Vertical)
         demod_splitter.setChildrenCollapsible(False)
 
-        # 3A. Ses Dalga Şekli (Audio Waveform Plot)
         audio_frame = QFrame()
         audio_layout = QVBoxLayout(audio_frame)
         audio_layout.setContentsMargins(0, 0, 0, 0)
@@ -887,7 +904,6 @@ class TacticalMainWindow(QMainWindow):
 
         demod_splitter.addWidget(audio_frame)
 
-        # 3B. Dijital Telemetri Çözücü (Digital Decoder Terminal)
         decoder_frame = QFrame()
         decoder_layout = QVBoxLayout(decoder_frame)
         decoder_layout.setContentsMargins(0, 0, 0, 0)
@@ -919,7 +935,6 @@ class TacticalMainWindow(QMainWindow):
         return container
 
     def on_demod_config_changed(self):
-        """Kullanıcı demodülasyon ayarını değiştirdiğinde QThread motorunu günceller."""
         raw_mode = self.cmb_demod_mode.currentText()
         if "AM" in raw_mode:
             mode = "AM"
@@ -944,7 +959,6 @@ class TacticalMainWindow(QMainWindow):
         self.log_message("BİLGİ", f"Demodülatör yapılandırması güncellendi: Mod={mode}, Squelch={squelch_db:.1f}dB, Ses=%{volume*100:.0f}")
 
     def toggle_audio_output(self):
-        """Hoparlör ses çıkışını açar veya kapatır."""
         self.audio_output_enabled = not self.audio_output_enabled
         if self.audio_output_enabled:
             self.btn_audio.setText("Sesi Kapat")
@@ -958,17 +972,13 @@ class TacticalMainWindow(QMainWindow):
             self.log_message("BİLGİ", "Ses çıkışı kapatıldı.")
 
     def on_demod_audio_ready(self, audio_samples: np.ndarray, power_db: float):
-        """Demodüle edilen ses dalga şeklini ve susturma durumunu günceller."""
         if len(audio_samples) > 0:
-            # Osiloskop eğrisini güncelle
             x_axis = np.arange(len(audio_samples))
             self.audio_curve.setData(x_axis, audio_samples)
 
-            # Hoparlöre aktar
             if self.audio_output_enabled:
                 self.audio_engine.write_audio_samples(audio_samples)
 
-        # Susturma / Güç Durumu
         self.lbl_audio_pwr.setText(f"GÜÇ: {power_db:.1f} dB")
         if power_db < self.spin_squelch.value():
             self.lbl_squelch_status.setText("SQUELCH: SUSTURULDU")
@@ -978,7 +988,6 @@ class TacticalMainWindow(QMainWindow):
             self.lbl_squelch_status.setStyleSheet("color: #00ff66; font-size: 10px; font-weight: bold;")
 
     def on_digital_payload_decoded(self, pkt: dict):
-        """Çözülen dijital taktik telemetri paketini ekrana formatlı olarak yansıtır."""
         pkt_no = pkt["paket_no"]
         callsign = pkt["cagri_kodu"]
         station = pkt["istasyon"]
