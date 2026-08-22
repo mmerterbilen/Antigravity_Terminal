@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Antigravity Taktik SDR Terminali - Ana Kullanıcı Arayüzü (Main UI)
-Gerçek Zamanlı Spektrum Analizörü (FFT), Şelale Göstergesi, RF Link Bütçesi Hesaplayıcı,
-ZeroMQ Middleware ve Taktik Sistem Loglama Konsolu Entegrasyonu.
+Çoklu İş Parçacığı (Multi-Threaded QThread) ile Yüksek Performanslı FFT & Şelale Göstergesi,
+RF Link Bütçesi Hesaplayıcı, ZeroMQ Middleware ve Taktik Sistem Loglama Konsolu.
 """
 
 import sys
@@ -11,7 +11,7 @@ import time
 import numpy as np
 import pyqtgraph as pg
 import zmq
-from PyQt5.QtCore import QRectF, Qt, QTimer, QTime
+from PyQt5.QtCore import QMutex, QRectF, Qt, QThread, QTime, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon, QPalette, QPen, QTextCursor
 from PyQt5.QtWidgets import (
     QApplication,
@@ -281,6 +281,99 @@ def create_tactical_colormap():
     return pg.ColorMap(pos, colors)
 
 
+class DSPWorkerThread(QThread):
+    """
+    Arka planda ZMQ I/Q verisi alan ve matematiksel FFT hesaplamalarını
+    ana arayüzü (GUI) bloklamadan icra eden optimize edilmiş iş parçacığı.
+    """
+
+    # Sinyal: (Frekans Ekseni, Genlik dB, Tepe Frekansı kHz, Tepe Gücü dB, Taban Gürültüsü dB, Örnek Sayısı)
+    spectrum_ready = pyqtSignal(np.ndarray, np.ndarray, float, float, float, int)
+    log_signal = pyqtSignal(str, str)
+
+    def __init__(self, address: str = "tcp://127.0.0.1:5555", sample_rate: float = 2.048e6):
+        super().__init__()
+        self.address = address
+        self.sample_rate = sample_rate
+        self._running = False
+        self.window_cache = {}
+
+    def run(self):
+        """İş parçacığı ana döngüsü."""
+        self._running = True
+        ctx = zmq.Context()
+        sub = ZMQSubscriber(address=self.address, topics=["IQ", ""], context=ctx)
+
+        poller = zmq.Poller()
+        if sub.socket:
+            poller.register(sub.socket, zmq.POLLIN)
+
+        self.log_signal.emit("BİLGİ", "Arka plan DSP iş parçacığı (QThread) aktif edildi.")
+
+        try:
+            while self._running:
+                # 20 ms zaman aşımı ile soketi yokla (Non-blocking I/O)
+                socks = dict(poller.poll(20))
+                if sub.socket and sub.socket in socks and socks[sub.socket] == zmq.POLLIN:
+                    # En son pakete kadar tüm tamponu tüket (Sıfır Gecikme)
+                    latest_iq = None
+                    while True:
+                        result = sub.receive_iq_data(flags=zmq.NOBLOCK)
+                        if result is None:
+                            break
+                        _, iq_data = result
+                        if len(iq_data) > 0:
+                            latest_iq = iq_data
+
+                    if latest_iq is not None and self._running:
+                        N = len(latest_iq)
+
+                        # 1. Hanning Penceresi (Önbellekten Hızlı Alım)
+                        if N not in self.window_cache:
+                            self.window_cache[N] = np.hanning(N)
+                        window = self.window_cache[N]
+
+                        # 2. FFT Hesaplama ve Merkezleme (Shift)
+                        windowed_iq = latest_iq * window
+                        fft_result = np.fft.fft(windowed_iq, n=N)
+                        fft_shifted = np.fft.fftshift(fft_result)
+
+                        # 3. Logaritmik Büyüklük (dB) Dönüşümü
+                        magnitude_linear = np.abs(fft_shifted) / N
+                        magnitude_db = 20.0 * np.log10(np.maximum(magnitude_linear, 1e-7))
+
+                        # 4. Frekans Ekseni (MHz)
+                        half_bw_mhz = (self.sample_rate / 2.0) / 1e6
+                        freq_axis = np.linspace(-half_bw_mhz, half_bw_mhz, N)
+
+                        # 5. Tepe ve Taban Analizi
+                        peak_idx = int(np.argmax(magnitude_db))
+                        peak_freq_khz = float(freq_axis[peak_idx] * 1000.0)
+                        peak_pwr = float(magnitude_db[peak_idx])
+                        noise_floor_est = float(np.median(magnitude_db))
+
+                        # Sinyal ile Ana GUI İş Parçacığına Güvenli Aktarım
+                        self.spectrum_ready.emit(
+                            freq_axis,
+                            magnitude_db,
+                            peak_freq_khz,
+                            peak_pwr,
+                            noise_floor_est,
+                            N,
+                        )
+        except Exception as e:
+            self.log_signal.emit("HATA", f"DSP İş parçacığında beklenmeyen hata: {e}")
+        finally:
+            sub.close()
+            ctx.term()
+            self.log_signal.emit("BİLGİ", "Arka plan DSP iş parçacığı güvenle kapatıldı.")
+
+    def stop(self):
+        """İş parçacığını güvenle durdurur."""
+        self._running = False
+        self.wait(1500)
+
+
 class TacticalMainWindow(QMainWindow):
     """Antigravity Taktik SDR Terminali Ana Pencere Sınıfı."""
 
@@ -302,33 +395,29 @@ class TacticalMainWindow(QMainWindow):
 
         # ZeroMQ Middleware Başlatma
         self.zmq_pub = None
-        self.zmq_sub = None
+        self.init_zmq()
 
         # Arayüzü Kur
         self.init_ui()
 
-        # ZMQ Bağlantısını Kur
-        self.init_zmq()
-
-        # FFT Veri Alım Zamanlayıcısı (30 ms ~ 33 FPS polling)
-        self.dsp_timer = QTimer(self)
-        self.dsp_timer.timeout.connect(self.process_incoming_dsp_data)
+        # Optimize Edilmiş Çoklu İş Parçacığı (QThread) Motoru
+        self.dsp_worker = DSPWorkerThread(address="tcp://127.0.0.1:5555", sample_rate=self.sample_rate)
+        self.dsp_worker.spectrum_ready.connect(self.on_spectrum_data_ready)
+        self.dsp_worker.log_signal.connect(self.log_message)
 
         # Başlangıç Loglarını Konsola İlet
-        self.log_message("SYSTEM", "Antigravity Taktik SDR Terminali başlatıldı.")
-        self.log_message("INFO", "Taktik GUI teması ve grafik motoru yüklendi.")
+        self.log_message("SYSTEM", "Antigravity Taktik SDR Terminali başlatıldı (Multi-Thread Engine Aktif).")
+        self.log_message("INFO", "Taktik GUI teması ve optimize grafik motoru yüklendi.")
 
         # İlk link bütçesi hesaplamasını otomatik tetikle
         self.calculate_rf_coverage()
 
     def init_zmq(self):
-        """ZeroMQ PUB/SUB bileşenlerini ilklendirir."""
+        """ZeroMQ PUB bileşenini ilklendirir."""
         try:
             self.zmq_pub = ZMQPublisher(address="tcp://127.0.0.1:5555", bind_mode=False)
-            self.zmq_sub = ZMQSubscriber(address="tcp://127.0.0.1:5555", topics=["IQ", ""])
-            self.log_message("INFO", "ZMQ Bağlantısı Kuruldu (tcp://127.0.0.1:5555)")
         except Exception as e:
-            self.log_message("ERROR", f"ZMQ ilklendirme hatası: {e}")
+            print(f"[ZMQ HATA] {e}")
 
     def init_ui(self):
         # 1. Ana Pencere Temel Ayarları
@@ -450,14 +539,14 @@ class TacticalMainWindow(QMainWindow):
         mod_layout = QVBoxLayout(module_group)
         mod_layout.setSpacing(6)
 
-        lbl_m1 = QLabel("✔ Spektrum & Şelale (Aktif)")
+        lbl_m1 = QLabel("✔ QThread Çoklu İş Parçacığı Motoru")
         lbl_m1.setStyleSheet("color: #00ff66; font-size: 11px;")
-        lbl_m2 = QLabel("✔ RF Link Bütçesi Hesaplayıcı")
+        lbl_m2 = QLabel("✔ Spektrum Analizörü & Şelale")
         lbl_m2.setStyleSheet("color: #00ff66; font-size: 11px;")
-        lbl_m3 = QLabel("✔ Taktik Log Konsolu (Aktif)")
+        lbl_m3 = QLabel("✔ RF Link Bütçesi Hesaplayıcı")
         lbl_m3.setStyleSheet("color: #00ff66; font-size: 11px;")
-        lbl_m4 = QLabel("✔ ZeroMQ I/Q Akışı (5555)")
-        lbl_m4.setStyleSheet("color: #58a6ff; font-size: 11px;")
+        lbl_m4 = QLabel("✔ Taktik Log Konsolu")
+        lbl_m4.setStyleSheet("color: #00ff66; font-size: 11px;")
 
         mod_layout.addWidget(lbl_m1)
         mod_layout.addWidget(lbl_m2)
@@ -555,7 +644,6 @@ class TacticalMainWindow(QMainWindow):
         timestamp = QTime.currentTime().toString("HH:mm:ss")
         level_upper = level.upper()
 
-        # Taktik Renk Eşlemesi
         if level_upper in ["SYSTEM", "SİSTEM"]:
             tag = "SİSTEM"
             tag_color = "#00ff66"
@@ -580,6 +668,10 @@ class TacticalMainWindow(QMainWindow):
             tag = "RF ANALİZ"
             tag_color = "#38d39f"
             text_color = "#e6edf3"
+        elif level_upper in ["SUCCESS", "BAŞARILI"]:
+            tag = "BAŞARILI"
+            tag_color = "#00ff66"
+            text_color = "#f0f6fc"
         else:
             tag = level_upper
             tag_color = "#8b949e"
@@ -594,7 +686,6 @@ class TacticalMainWindow(QMainWindow):
         )
 
         self.txt_console.append(formatted_html)
-        # Otomatik olarak en alt satıra kaydır
         self.txt_console.moveCursor(QTextCursor.End)
 
     def clear_logs(self):
@@ -882,83 +973,59 @@ class TacticalMainWindow(QMainWindow):
         layout.addWidget(value_label)
         return frame
 
-    def process_incoming_dsp_data(self):
-        """ZMQ üzerinden gelen I/Q verilerini okur, FFT hesaplar ve Spektrum ile Şelaleyi günceller."""
-        if not self.zmq_sub:
-            return
+    def on_spectrum_data_ready(
+        self,
+        freq_axis: np.ndarray,
+        magnitude_db: np.ndarray,
+        peak_freq_khz: float,
+        peak_pwr: float,
+        noise_floor_est: float,
+        N: int,
+    ):
+        """
+        QThread tarafından hesaplanan FFT verilerini güvenle alır ve GUI grafiklerini günceller.
+        Bu metod ana GUI iş parçacığında (Main Thread) çalışır.
+        """
+        self.fft_size = N
+        self.total_frames_received += 1
+        self.fps_counter += 1
 
-        latest_iq = None
-        # Kuyruktaki tüm paketleri tüketip en son paketi al (Düşük gecikme için)
-        while True:
-            result = self.zmq_sub.receive_iq_data(flags=zmq.NOBLOCK)
-            if result is None:
-                break
-            _, iq_data = result
-            if len(iq_data) > 0:
-                latest_iq = iq_data
-                self.total_frames_received += 1
-                self.fps_counter += 1
+        # 1. Spektrum Çizgisini Güncelle
+        self.spectrum_curve.setData(freq_axis, magnitude_db)
 
-        if latest_iq is not None:
-            N = len(latest_iq)
-            self.fft_size = N
+        # 2. Max-Hold (Tepe Tutma) Güncelle
+        if self.max_hold_data is None or len(self.max_hold_data) != N:
+            self.max_hold_data = magnitude_db.copy()
+        else:
+            self.max_hold_data = np.maximum(self.max_hold_data * 0.995, magnitude_db)
+        self.max_hold_curve.setData(freq_axis, self.max_hold_data)
 
-            # 1. Hanning Pencereleme Uygula (Spektral Sızıntıyı Önle)
-            window = np.hanning(N)
-            windowed_iq = latest_iq * window
-
-            # 2. FFT Hesaplama ve Merkezleme (FFT Shift)
-            fft_result = np.fft.fft(windowed_iq, n=N)
-            fft_shifted = np.fft.fftshift(fft_result)
-
-            # 3. Logaritmik Büyüklük (dB) Dönüşümü
-            magnitude_linear = np.abs(fft_shifted) / N
-            magnitude_db = 20.0 * np.log10(np.maximum(magnitude_linear, 1e-7))
-
-            # 4. Frekans Ekseni (MHz Cinsinden Merkez Çevresi)
+        # 3. Şelale (Waterfall) 2D Verisini Kaydır ve Güncelle
+        if self.waterfall_data.shape[0] != N:
             half_bw_mhz = (self.sample_rate / 2.0) / 1e6
-            freq_axis = np.linspace(-half_bw_mhz, half_bw_mhz, N)
+            self.waterfall_data = np.full((N, self.history_depth), -115.0, dtype=np.float32)
+            self.waterfall_img.setRect(QRectF(-half_bw_mhz, 0, 2.0 * half_bw_mhz, self.history_depth))
 
-            # 5. Spektrum Eğrisini Güncelle
-            self.spectrum_curve.setData(freq_axis, magnitude_db)
+        self.waterfall_data = np.roll(self.waterfall_data, 1, axis=1)
+        self.waterfall_data[:, 0] = magnitude_db.astype(np.float32)
+        self.waterfall_img.setImage(self.waterfall_data, autoLevels=False, levels=[-110.0, -25.0])
 
-            # 6. Max-Hold (Tepe Tutma) Güncelle
-            if self.max_hold_data is None or len(self.max_hold_data) != N:
-                self.max_hold_data = magnitude_db.copy()
-            else:
-                self.max_hold_data = np.maximum(self.max_hold_data * 0.995, magnitude_db)
-            self.max_hold_curve.setData(freq_axis, self.max_hold_data)
+        # 4. HUD Telemetri Kartlarını Güncelle
+        self.card_peak_freq.setText(f"{peak_freq_khz:+.1f} kHz")
+        self.card_peak_pwr.setText(f"{peak_pwr:.1f} dB")
+        self.card_noise_floor.setText(f"{noise_floor_est:.1f} dB")
 
-            # 7. Şelale (Waterfall) 2D Verisini Kaydır ve Güncelle
-            if self.waterfall_data.shape[0] != N:
-                self.waterfall_data = np.full((N, self.history_depth), -115.0, dtype=np.float32)
-                self.waterfall_img.setRect(QRectF(-half_bw_mhz, 0, 2.0 * half_bw_mhz, self.history_depth))
+        # 5. FPS Sayacı Güncellemesi
+        now = time.time()
+        dt = now - self.last_fps_time
+        if dt >= 1.0:
+            fps = self.fps_counter / dt
+            self.card_fps_val.setText(f"{fps:.1f} FPS")
+            self.fps_counter = 0
+            self.last_fps_time = now
 
-            self.waterfall_data = np.roll(self.waterfall_data, 1, axis=1)
-            self.waterfall_data[:, 0] = magnitude_db.astype(np.float32)
-            self.waterfall_img.setImage(self.waterfall_data, autoLevels=False, levels=[-110.0, -25.0])
-
-            # 8. Tepe Frekans ve Güç Analizi
-            peak_idx = int(np.argmax(magnitude_db))
-            peak_freq_khz = freq_axis[peak_idx] * 1000.0
-            peak_pwr = magnitude_db[peak_idx]
-            noise_floor_est = float(np.median(magnitude_db))
-
-            self.card_peak_freq.setText(f"{peak_freq_khz:+.1f} kHz")
-            self.card_peak_pwr.setText(f"{peak_pwr:.1f} dB")
-            self.card_noise_floor.setText(f"{noise_floor_est:.1f} dB")
-
-            # FPS Sayacı Güncellemesi
-            now = time.time()
-            dt = now - self.last_fps_time
-            if dt >= 1.0:
-                fps = self.fps_counter / dt
-                self.card_fps_val.setText(f"{fps:.1f} FPS")
-                self.fps_counter = 0
-                self.last_fps_time = now
-
-            self.lbl_dsp_badge.setText(f"[ AKIŞ: CANLI ({N} I/Q) ]")
-            self.lbl_dsp_badge.setStyleSheet("color: #00ff66; font-weight: bold; font-size: 11px;")
+        self.lbl_dsp_badge.setText(f"[ AKIŞ: CANLI ({N} I/Q - QThread) ]")
+        self.lbl_dsp_badge.setStyleSheet("color: #00ff66; font-weight: bold; font-size: 11px;")
 
     def calculate_rf_coverage(self):
         """Kullanıcı girişlerine göre Friis Link Bütçesini hesaplar ve grafiği günceller."""
@@ -1073,12 +1140,12 @@ class TacticalMainWindow(QMainWindow):
             self.lbl_system_status.setStyleSheet(
                 "color: #00ff66; font-weight: bold; font-size: 11px; padding: 4px;"
             )
-            self.status_msg.setText("Sistem Aktif - ZMQ Spektrum & Şelale Alımı Başlatıldı")
+            self.status_msg.setText("Sistem Aktif - QThread DSP Spektrum & Şelale Alımı Başlatıldı")
             self.status_msg.setStyleSheet("color: #00ff66; font-weight: bold;")
             
-            # FFT alım zamanlayıcısını başlat (~33 FPS)
-            self.dsp_timer.start(30)
-            self.log_message("DURUM", "Veri Akışı Aktif - Real-Time FFT & Şelale alımı başlatıldı.")
+            # Arka plan QThread motorunu başlat
+            self.dsp_worker.start()
+            self.log_message("DURUM", "Veri Akışı Aktif - Çoklu iş parçacıklı (QThread) FFT & Şelale alımı başlatıldı.")
         else:
             self.btn_start.setText("Sistemi Başlat")
             self.btn_start.setStyleSheet("")  # Varsayılan taktik yeşile döner
@@ -1089,21 +1156,19 @@ class TacticalMainWindow(QMainWindow):
             self.status_msg.setText("Sistem Durduruldu - Beklemede")
             self.status_msg.setStyleSheet("color: #ffaa00; font-weight: bold;")
             
-            # Zamanlayıcıyı durdur
-            self.dsp_timer.stop()
+            # Arka plan iş parçacığını durdur
+            self.dsp_worker.stop()
             self.lbl_dsp_badge.setText("[ AKIŞ: DURDURULDU ]")
             self.lbl_dsp_badge.setStyleSheet("color: #ffaa00; font-weight: bold; font-size: 11px;")
-            self.log_message("DURUM", "Veri Akışı Durduruldu - Terminal bekleme moduna alındı.")
+            self.log_message("DURUM", "Veri Akışı Durduruldu - Arka plan DSP iş parçacığı durduruldu.")
 
     def closeEvent(self, event):
-        """Pencere kapatıldığında zamanlayıcıları ve ZeroMQ soketlerini temizler."""
-        self.log_message("SYSTEM", "Terminal kapatılıyor. Soketler temizleniyor...")
-        if hasattr(self, "dsp_timer") and self.dsp_timer.isActive():
-            self.dsp_timer.stop()
+        """Pencere kapatıldığında arka plan iş parçacıklarını ve ZeroMQ soketlerini temizler."""
+        self.log_message("SYSTEM", "Terminal kapatılıyor. Soketler ve iş parçacıkları temizleniyor...")
+        if hasattr(self, "dsp_worker") and self.dsp_worker.isRunning():
+            self.dsp_worker.stop()
         if self.zmq_pub:
             self.zmq_pub.close()
-        if self.zmq_sub:
-            self.zmq_sub.close()
         event.accept()
 
 
