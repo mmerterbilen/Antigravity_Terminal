@@ -3,11 +3,13 @@
 """
 Antigravity Taktik SDR Terminali - ZeroMQ Ara Katman (Middleware) Modülü
 PUB/SUB mimarisi ile yüksek hızlı, asenkron ve bloklamasız veri iletimi.
+I/Q karmaşık sayı dizilerinin ikili (binary) serileştirilmesini destekler.
 """
 
 import json
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
+import numpy as np
 import zmq
 
 
@@ -17,33 +19,40 @@ DEFAULT_ZMQ_ADDRESS = "tcp://127.0.0.1:5555"
 class ZMQPublisher:
     """ZeroMQ Yayıncı (Publisher - PUB) Sınıfı."""
 
-    def __init__(self, address: str = DEFAULT_ZMQ_ADDRESS, context: Optional[zmq.Context] = None):
+    def __init__(
+        self,
+        address: str = DEFAULT_ZMQ_ADDRESS,
+        bind_mode: bool = True,
+        context: Optional[zmq.Context] = None,
+    ):
         self.address = address
+        self.bind_mode = bind_mode
         self.context = context or zmq.Context.instance()
         self.socket: Optional[zmq.Socket] = None
-        self._is_bound = False
-        self.bind()
+        self._is_active = False
+        self.setup_socket()
 
-    def bind(self):
-        """PUB soketini belirtilen adrese bağlar."""
-        if not self._is_bound:
+    def setup_socket(self):
+        """PUB soketini oluşturur ve bağlar (veya bağlanır)."""
+        if not self._is_active:
             self.socket = self.context.socket(zmq.PUB)
-            # Soket kapatıldığında beklemeyi önle
             self.socket.setsockopt(zmq.LINGER, 0)
-            self.socket.bind(self.address)
-            self._is_bound = True
+            try:
+                if self.bind_mode:
+                    self.socket.bind(self.address)
+                else:
+                    self.socket.connect(self.address)
+                self._is_active = True
+            except zmq.ZMQError as e:
+                print(f"[ZMQ PUB UYARI] Soket kurulumu ({self.address}): {e}")
+                self._is_active = False
 
     def send_string(self, message: str, topic: str = "") -> bool:
-        """
-        Dize mesajını yayınlar. Konu (topic) belirtilmişse 'TOPIC MESSAGE' olarak iletilir.
-        """
-        if not self.socket or self.socket.closed:
+        """Dize mesajını yayınlar."""
+        if not self.socket or self.socket.closed or not self._is_active:
             return False
         try:
-            if topic:
-                full_msg = f"{topic} {message}"
-            else:
-                full_msg = message
+            full_msg = f"{topic} {message}" if topic else message
             self.socket.send_string(full_msg)
             return True
         except zmq.ZMQError as e:
@@ -54,11 +63,31 @@ class ZMQPublisher:
         """JSON verisini yayınlar."""
         return self.send_string(json.dumps(data), topic=topic)
 
+    def send_iq_data(self, iq_samples: np.ndarray, topic: str = "IQ") -> bool:
+        """
+        Karmaşık I/Q numpy dizisini ikili (binary) biçimde yüksek hızla yayınlar.
+        """
+        if not self.socket or self.socket.closed or not self._is_active:
+            return False
+        try:
+            # Complex64 (32-bit float I + 32-bit float Q) formatına dönüştür
+            if iq_samples.dtype != np.complex64:
+                iq_bytes = iq_samples.astype(np.complex64).tobytes()
+            else:
+                iq_bytes = iq_samples.tobytes()
+
+            topic_bytes = topic.encode("utf-8")
+            self.socket.send_multipart([topic_bytes, iq_bytes])
+            return True
+        except zmq.ZMQError as e:
+            print(f"[ZMQ PUB HATA] I/Q verisi iletilemedi: {e}")
+            return False
+
     def close(self):
         """Soketi kapatır."""
         if self.socket and not self.socket.closed:
             self.socket.close()
-            self._is_bound = False
+            self._is_active = False
 
 
 class ZMQSubscriber:
@@ -92,7 +121,7 @@ class ZMQSubscriber:
             self._is_connected = True
 
     def subscribe(self, topic: str = ""):
-        """Belirtilen konuya abone olur (boş dize tüm konuları kapsar)."""
+        """Belirtilen konuya abone olur."""
         if self.socket and not self.socket.closed:
             self.socket.setsockopt_string(zmq.SUBSCRIBE, topic)
 
@@ -102,10 +131,7 @@ class ZMQSubscriber:
             self.socket.setsockopt_string(zmq.UNSUBSCRIBE, topic)
 
     def receive_string(self, flags: int = zmq.NOBLOCK) -> Optional[str]:
-        """
-        Bloklamasız (non-blocking) veya bloklamalı dize mesajı alır.
-        Mesaj yoksa None döndürür.
-        """
+        """Bloklamasız veya bloklamalı dize mesajı alır."""
         if not self.socket or self.socket.closed:
             return None
         try:
@@ -126,6 +152,30 @@ class ZMQSubscriber:
         except json.JSONDecodeError:
             return None
 
+    def receive_iq_data(self, flags: int = zmq.NOBLOCK) -> Optional[Tuple[str, np.ndarray]]:
+        """
+        Bloklamasız ikili I/Q numpy dizisini alır.
+        Dönüş: (konu_adı, np.ndarray(dtype=complex64)) veya None
+        """
+        if not self.socket or self.socket.closed:
+            return None
+        try:
+            frames = self.socket.recv_multipart(flags=flags)
+            if len(frames) >= 2:
+                topic = frames[0].decode("utf-8", errors="ignore")
+                raw_bytes = frames[1]
+                iq_array = np.frombuffer(raw_bytes, dtype=np.complex64)
+                return topic, iq_array
+            elif len(frames) == 1:
+                iq_array = np.frombuffer(frames[0], dtype=np.complex64)
+                return "", iq_array
+            return None
+        except zmq.Again:
+            return None
+        except zmq.ZMQError as e:
+            print(f"[ZMQ SUB HATA] I/Q verisi okunamadı: {e}")
+            return None
+
     def close(self):
         """Soketi kapatır."""
         if self.socket and not self.socket.closed:
@@ -141,13 +191,11 @@ def execute_ping_test(
 ) -> Tuple[bool, str]:
     """
     ZeroMQ PUB/SUB köprüsü üzerinde PING/PONG bağlantı testi icra eder.
-    
-    :return: (test_başarılı_mı, detay_mesajı)
     """
     should_cleanup = False
     if publisher is None or subscriber is None:
         ctx = zmq.Context.instance()
-        pub = ZMQPublisher(address=address, context=ctx)
+        pub = ZMQPublisher(address=address, bind_mode=True, context=ctx)
         sub = ZMQSubscriber(address=address, context=ctx)
         should_cleanup = True
     else:
@@ -155,27 +203,26 @@ def execute_ping_test(
         sub = subscriber
 
     try:
-        # ZMQ bağlantı el sıkışması (handshake) için kısa bir gecikme
         time.sleep(0.1)
 
         # Eski kuyrukları temizle
         while sub.receive_string(flags=zmq.NOBLOCK) is not None:
             pass
 
-        # "PING" mesajını yayınla
         test_payload = "PING"
         sent_success = pub.send_string(test_payload)
         if not sent_success:
             return False, "HATA: PING mesajı sokete gönderilemedi."
 
-        # Bloklamasız polling ile yanıtı bekle
         start_time = time.time()
         received_msg = None
         while (time.time() - start_time) * 1000.0 < timeout_ms:
             msg = sub.receive_string(flags=zmq.NOBLOCK)
             if msg is not None:
-                received_msg = msg
-                break
+                # Eşleşme kontrolü (konulu veya konusuz)
+                if "PING" in msg:
+                    received_msg = "PING"
+                    break
             time.sleep(0.01)
 
         if received_msg == "PING":
