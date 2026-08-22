@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Antigravity Taktik SDR Terminali - Ana Kullanıcı Arayüzü (Main UI)
-Gerçek Zamanlı Spektrum Analizörü (FFT), Şelale (Waterfall/Spektrogram) Göstergesi,
-RF Link Bütçesi Hesaplayıcı ve ZeroMQ Middleware Entegrasyonu.
+Gerçek Zamanlı Spektrum Analizörü (FFT), Şelale Göstergesi, RF Link Bütçesi Hesaplayıcı,
+ZeroMQ Middleware ve Taktik Sistem Loglama Konsolu Entegrasyonu.
 """
 
 import sys
@@ -12,7 +12,7 @@ import numpy as np
 import pyqtgraph as pg
 import zmq
 from PyQt5.QtCore import QRectF, Qt, QTimer, QTime
-from PyQt5.QtGui import QColor, QFont, QIcon, QPalette, QPen
+from PyQt5.QtGui import QColor, QFont, QIcon, QPalette, QPen, QTextCursor
 from PyQt5.QtWidgets import (
     QApplication,
     QDoubleSpinBox,
@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QStatusBar,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -106,6 +107,20 @@ QGroupBox::title {
     font-size: 11px;
 }
 
+/* --- Taktik Log Konsolu (QTextEdit) --- */
+QTextEdit#console_log {
+    background-color: #080b10;
+    color: #c9d1d9;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 8px;
+    selection-background-color: #1f3a29;
+    selection-color: #00ff66;
+}
+
 /* --- Girdi Kutuları (QDoubleSpinBox) --- */
 QDoubleSpinBox {
     background-color: #0d1117;
@@ -134,7 +149,7 @@ QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
     background-color: #30363d;
 }
 
-/* --- Buton Stili (Taktik Yeşil Vurgu) --- */
+/* --- Buton Stili (Taktik Vurgular) --- */
 QPushButton {
     background-color: #21262d;
     color: #f0f6fc;
@@ -198,6 +213,20 @@ QPushButton#btn_calculate:hover {
     background-color: #1b633f;
     color: #ffffff;
     border: 1px solid #39ff14;
+}
+
+QPushButton#btn_small {
+    background-color: #161b22;
+    color: #8b949e;
+    border: 1px solid #30363d;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 4px;
+}
+
+QPushButton#btn_small:hover {
+    color: #f0f6fc;
+    border-color: #8b949e;
 }
 
 /* --- Çerçeve ve Bölücüler --- */
@@ -274,29 +303,38 @@ class TacticalMainWindow(QMainWindow):
         # ZeroMQ Middleware Başlatma
         self.zmq_pub = None
         self.zmq_sub = None
-        self.init_zmq()
 
         # Arayüzü Kur
         self.init_ui()
 
+        # ZMQ Bağlantısını Kur
+        self.init_zmq()
+
         # FFT Veri Alım Zamanlayıcısı (30 ms ~ 33 FPS polling)
         self.dsp_timer = QTimer(self)
         self.dsp_timer.timeout.connect(self.process_incoming_dsp_data)
+
+        # Başlangıç Loglarını Konsola İlet
+        self.log_message("SYSTEM", "Antigravity Taktik SDR Terminali başlatıldı.")
+        self.log_message("INFO", "Taktik GUI teması ve grafik motoru yüklendi.")
+
+        # İlk link bütçesi hesaplamasını otomatik tetikle
+        self.calculate_rf_coverage()
 
     def init_zmq(self):
         """ZeroMQ PUB/SUB bileşenlerini ilklendirir."""
         try:
             self.zmq_pub = ZMQPublisher(address="tcp://127.0.0.1:5555", bind_mode=False)
             self.zmq_sub = ZMQSubscriber(address="tcp://127.0.0.1:5555", topics=["IQ", ""])
-            print("[ZMQ INIT] ZeroMQ PUB/SUB köprüsü (tcp://127.0.0.1:5555) hazırlandı.")
+            self.log_message("INFO", "ZMQ Bağlantısı Kuruldu (tcp://127.0.0.1:5555)")
         except Exception as e:
-            print(f"[ZMQ HATA] ZeroMQ ilklendirme hatası: {e}")
+            self.log_message("ERROR", f"ZMQ ilklendirme hatası: {e}")
 
     def init_ui(self):
         # 1. Ana Pencere Temel Ayarları
         self.setWindowTitle("Antigravity Taktik SDR Terminali")
-        self.resize(1380, 880)
-        self.setMinimumSize(1060, 680)
+        self.resize(1400, 900)
+        self.setMinimumSize(1080, 700)
 
         # 2. Merkezi Widget ve Ana Düzen
         central_widget = QWidget(self)
@@ -305,21 +343,21 @@ class TacticalMainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # 3. Bölücü (Splitter) ile Esnek Düzen
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        main_layout.addWidget(splitter)
+        # 3. Yatay Bölücü (Splitter): Sol Kontrol Paneli | Sağ Çalışma Alanı
+        main_splitter = QSplitter(Qt.Horizontal)
+        main_splitter.setChildrenCollapsible(False)
+        main_layout.addWidget(main_splitter)
 
         # 4. Sol Kenar Çubuğu (Kontrol Paneli)
         sidebar_widget = self.create_sidebar()
-        splitter.addWidget(sidebar_widget)
+        main_splitter.addWidget(sidebar_widget)
 
-        # 5. Merkezi Sekme Alanı (Göstergeler ve Hesaplayıcılar)
-        central_tabs = self.create_central_tabs()
-        splitter.addWidget(central_tabs)
+        # 5. Sağ Alan: Dikey Bölücü (Üstte Sekmeler, Altta Sistem Logları Konsolu)
+        right_panel = self.create_right_panel()
+        main_splitter.addWidget(right_panel)
 
-        # Bölücü Başlangıç Oranları (%22 Kontrol, %78 Çalışma Alanı)
-        splitter.setSizes([290, 1090])
+        # Yatay Bölücü Başlangıç Oranları (%21 Kontrol, %79 Çalışma Alanı)
+        main_splitter.setSizes([290, 1110])
 
         # 6. Alt Durum Çubuğu (Status Bar)
         self.setup_status_bar()
@@ -328,9 +366,6 @@ class TacticalMainWindow(QMainWindow):
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self.update_clock)
         self.clock_timer.start(1000)
-
-        # İlk link bütçesi hesaplamasını otomatik tetikle
-        self.calculate_rf_coverage()
 
     def create_sidebar(self) -> QWidget:
         """Sol kontrol paneli bileşenlerini oluşturur."""
@@ -415,16 +450,19 @@ class TacticalMainWindow(QMainWindow):
         mod_layout = QVBoxLayout(module_group)
         mod_layout.setSpacing(6)
 
-        lbl_m1 = QLabel("✔ Spektrum Analizörü & Şelale (Aktif)")
+        lbl_m1 = QLabel("✔ Spektrum & Şelale (Aktif)")
         lbl_m1.setStyleSheet("color: #00ff66; font-size: 11px;")
         lbl_m2 = QLabel("✔ RF Link Bütçesi Hesaplayıcı")
         lbl_m2.setStyleSheet("color: #00ff66; font-size: 11px;")
-        lbl_m3 = QLabel("✔ ZeroMQ I/Q Veri Akışı (5555)")
-        lbl_m3.setStyleSheet("color: #58a6ff; font-size: 11px;")
+        lbl_m3 = QLabel("✔ Taktik Log Konsolu (Aktif)")
+        lbl_m3.setStyleSheet("color: #00ff66; font-size: 11px;")
+        lbl_m4 = QLabel("✔ ZeroMQ I/Q Akışı (5555)")
+        lbl_m4.setStyleSheet("color: #58a6ff; font-size: 11px;")
 
         mod_layout.addWidget(lbl_m1)
         mod_layout.addWidget(lbl_m2)
         mod_layout.addWidget(lbl_m3)
+        mod_layout.addWidget(lbl_m4)
 
         layout.addWidget(module_group)
 
@@ -439,20 +477,130 @@ class TacticalMainWindow(QMainWindow):
 
         return sidebar
 
-    def create_central_tabs(self) -> QWidget:
-        """Merkezi sekme yapısını ve içeriğini oluşturur."""
+    def create_right_panel(self) -> QWidget:
+        """Sağ çalışma alanını (Sekmeler + Sistem Logları Konsolu) oluşturur."""
+        right_container = QWidget()
+        layout = QVBoxLayout(right_container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Dikey Bölücü: Üstte Sekmeler (%75), Altta Log Konsolu (%25)
+        self.right_splitter = QSplitter(Qt.Vertical)
+        self.right_splitter.setChildrenCollapsible(False)
+
+        # 1. Merkezi Sekme Alanı
         self.tab_widget = QTabWidget()
         self.tab_widget.setDocumentMode(True)
 
-        # 1. Sekme: Spektrum ve Şelale Ekranı (Phase 6 & 7)
         tab_spectrum_waterfall = self.create_spectrum_waterfall_tab()
         self.tab_widget.addTab(tab_spectrum_waterfall, "📡 Spektrum & Şelale")
 
-        # 2. Sekme: RF Kapsama Alanı (Link Budget)
         tab_rf_coverage = self.create_rf_coverage_tab()
         self.tab_widget.addTab(tab_rf_coverage, "📊 RF Kapsama Alanı")
 
-        return self.tab_widget
+        self.right_splitter.addWidget(self.tab_widget)
+
+        # 2. Sistem Logları Konsol Paneli
+        console_panel = self.create_console_panel()
+        self.right_splitter.addWidget(console_panel)
+
+        # Başlangıç Dikey Boyutları (720px Üst, 180px Log Konsolu)
+        self.right_splitter.setSizes([680, 180])
+
+        layout.addWidget(self.right_splitter)
+        return right_container
+
+    def create_console_panel(self) -> QWidget:
+        """Sistem Logları Konsol Widget'ını oluşturur."""
+        container = QFrame()
+        container.setStyleSheet("background-color: #161b22; border-top: 1px solid #30363d;")
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(14, 8, 14, 10)
+        layout.setSpacing(6)
+
+        # Konsol Başlık Çubuğu
+        header = QHBoxLayout()
+        title_label = QLabel("SİSTEM LOGLARI")
+        title_label.setStyleSheet("color: #00ff66; font-weight: bold; font-size: 12px; letter-spacing: 1px;")
+
+        badge = QLabel("[ CANLI KONSOL GÜNLÜĞÜ ]")
+        badge.setStyleSheet("color: #8b949e; font-size: 10px;")
+
+        btn_clear = QPushButton("Temizle")
+        btn_clear.setObjectName("btn_small")
+        btn_clear.setToolTip("Konsol loglarını temizler")
+        btn_clear.setCursor(Qt.PointingHandCursor)
+        btn_clear.clicked.connect(self.clear_logs)
+
+        header.addWidget(title_label)
+        header.addWidget(badge)
+        header.addStretch()
+        header.addWidget(btn_clear)
+
+        layout.addLayout(header)
+
+        # Log Metin Alanı (QTextEdit, Read-Only)
+        self.txt_console = QTextEdit()
+        self.txt_console.setObjectName("console_log")
+        self.txt_console.setReadOnly(True)
+        self.txt_console.setAcceptRichText(True)
+        layout.addWidget(self.txt_console)
+
+        return container
+
+    def log_message(self, level: str, message: str):
+        """
+        Taktik konsola zaman damgalı ve renk kodlu Türkçe log iletisi ekler.
+        """
+        timestamp = QTime.currentTime().toString("HH:mm:ss")
+        level_upper = level.upper()
+
+        # Taktik Renk Eşlemesi
+        if level_upper in ["SYSTEM", "SİSTEM"]:
+            tag = "SİSTEM"
+            tag_color = "#00ff66"
+            text_color = "#f0f6fc"
+        elif level_upper in ["INFO", "BİLGİ"]:
+            tag = "BİLGİ"
+            tag_color = "#58a6ff"
+            text_color = "#c9d1d9"
+        elif level_upper in ["STATUS", "DURUM"]:
+            tag = "DURUM"
+            tag_color = "#39ff14"
+            text_color = "#f0f6fc"
+        elif level_upper in ["WARN", "UYARI"]:
+            tag = "UYARI"
+            tag_color = "#ffaa00"
+            text_color = "#ffd33d"
+        elif level_upper in ["ERROR", "HATA"]:
+            tag = "HATA"
+            tag_color = "#ff4d4f"
+            text_color = "#ff7b72"
+        elif level_upper in ["RF", "RF ANALİZ"]:
+            tag = "RF ANALİZ"
+            tag_color = "#38d39f"
+            text_color = "#e6edf3"
+        else:
+            tag = level_upper
+            tag_color = "#8b949e"
+            text_color = "#c9d1d9"
+
+        formatted_html = (
+            f'<div style="margin-bottom: 2px;">'
+            f'<span style="color: #6e7681; font-weight: normal;">[{timestamp}]</span> '
+            f'<span style="color: {tag_color}; font-weight: bold;">[{tag}]</span> '
+            f'<span style="color: {text_color};">{message}</span>'
+            f'</div>'
+        )
+
+        self.txt_console.append(formatted_html)
+        # Otomatik olarak en alt satıra kaydır
+        self.txt_console.moveCursor(QTextCursor.End)
+
+    def clear_logs(self):
+        """Konsol ekranını temizler."""
+        self.txt_console.clear()
+        self.log_message("SYSTEM", "Konsol günlüğü temizlendi.")
 
     def create_spectrum_waterfall_tab(self) -> QWidget:
         """Gerçek Zamanlı FFT Spektrum Analizörü ve Şelale Ekranını oluşturur."""
@@ -556,7 +704,7 @@ class TacticalMainWindow(QMainWindow):
         display_splitter.addWidget(self.waterfall_plot)
 
         # Dikey Bölücü Oranları (%50 Spektrum, %50 Şelale)
-        display_splitter.setSizes([360, 360])
+        display_splitter.setSizes([320, 320])
 
         layout.addWidget(display_splitter, stretch=1)
 
@@ -860,17 +1008,26 @@ class TacticalMainWindow(QMainWindow):
         )
         self.freq_badge.setText(f"Frekans: {freq_mhz:.2f} MHz")
 
+        # Konsola Log İlet
+        self.log_message(
+            "RF ANALİZ",
+            f"Link Bütçesi: f={freq_mhz:.1f}MHz | d={target_dist_km:.2f}km | FSPL={target_fspl:.2f}dB | Prx={target_rx:.2f}dBm | Kalite={quality_text}"
+        )
+
     def perform_zmq_ping_test(self):
         """ZeroMQ PUB/SUB köprüsünü test eder ve sonucu konsola ile arayüze yansıtır."""
+        self.log_message("BİLGİ", "ZeroMQ bağlantı testi başlatılıyor (tcp://127.0.0.1:5555)...")
         success, detail = execute_ping_test(
             address="tcp://127.0.0.1:5555",
         )
         if success:
             self.status_msg.setText("ZMQ Testi Başarılı: PING -> Alındı (tcp://127.0.0.1:5555)")
             self.status_msg.setStyleSheet("color: #00ff66; font-weight: bold;")
+            self.log_message("BAŞARILI", f"ZMQ Bağlantı Testi Başarılı: {detail}")
         else:
             self.status_msg.setText(f"ZMQ Test Hatası: {detail}")
             self.status_msg.setStyleSheet("color: #ff4d4f; font-weight: bold;")
+            self.log_message("HATA", f"ZMQ Bağlantı Testi Başarısız: {detail}")
 
     def setup_status_bar(self):
         """Alt taktik durum çubuğunu yapılandırır."""
@@ -921,6 +1078,7 @@ class TacticalMainWindow(QMainWindow):
             
             # FFT alım zamanlayıcısını başlat (~33 FPS)
             self.dsp_timer.start(30)
+            self.log_message("DURUM", "Veri Akışı Aktif - Real-Time FFT & Şelale alımı başlatıldı.")
         else:
             self.btn_start.setText("Sistemi Başlat")
             self.btn_start.setStyleSheet("")  # Varsayılan taktik yeşile döner
@@ -935,9 +1093,11 @@ class TacticalMainWindow(QMainWindow):
             self.dsp_timer.stop()
             self.lbl_dsp_badge.setText("[ AKIŞ: DURDURULDU ]")
             self.lbl_dsp_badge.setStyleSheet("color: #ffaa00; font-weight: bold; font-size: 11px;")
+            self.log_message("DURUM", "Veri Akışı Durduruldu - Terminal bekleme moduna alındı.")
 
     def closeEvent(self, event):
         """Pencere kapatıldığında zamanlayıcıları ve ZeroMQ soketlerini temizler."""
+        self.log_message("SYSTEM", "Terminal kapatılıyor. Soketler temizleniyor...")
         if hasattr(self, "dsp_timer") and self.dsp_timer.isActive():
             self.dsp_timer.stop()
         if self.zmq_pub:
