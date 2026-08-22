@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 Antigravity Taktik SDR Terminali - Ana Kullanıcı Arayüzü (Main UI)
-Modern, koyu taktik temalı PyQt5 ana pencere ve RF Link Bütçesi Hesaplayıcı modülü.
+Modern, koyu taktik temalı PyQt5 ana pencere, RF Link Bütçesi ve ZeroMQ Middleware Entegrasyonu.
 """
 
 import sys
+import time
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt, QTimer, QTime
@@ -31,6 +32,7 @@ from PyQt5.QtWidgets import (
 )
 
 from rf_calculator import compute_link_budget
+from zmq_manager import ZMQPublisher, ZMQSubscriber, execute_ping_test
 
 
 TACTICAL_STYLESHEET = """
@@ -167,6 +169,20 @@ QPushButton#btn_primary:hover {
     border: 1px solid #39ff14;
 }
 
+QPushButton#btn_ping {
+    background-color: #1b2838;
+    color: #58a6ff;
+    border: 1px solid #58a6ff;
+    font-size: 12px;
+    padding: 7px 12px;
+}
+
+QPushButton#btn_ping:hover {
+    background-color: #243b55;
+    color: #ffffff;
+    border: 1px solid #79c0ff;
+}
+
 QPushButton#btn_calculate {
     background-color: #0f3e27;
     color: #00ff66;
@@ -226,7 +242,22 @@ class TacticalMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.is_running = False
+        
+        # ZeroMQ Middleware Başlatma
+        self.zmq_pub = None
+        self.zmq_sub = None
+        self.init_zmq()
+
         self.init_ui()
+
+    def init_zmq(self):
+        """ZeroMQ PUB/SUB bileşenlerini ilklendirir."""
+        try:
+            self.zmq_pub = ZMQPublisher(address="tcp://127.0.0.1:5555")
+            self.zmq_sub = ZMQSubscriber(address="tcp://127.0.0.1:5555")
+            print("[ZMQ INIT] ZeroMQ PUB/SUB köprüsü (tcp://127.0.0.1:5555) başarıyla oluşturuldu.")
+        except Exception as e:
+            print(f"[ZMQ HATA] ZeroMQ ilklendirme hatası: {e}")
 
     def init_ui(self):
         # 1. Ana Pencere Temel Ayarları
@@ -297,10 +328,10 @@ class TacticalMainWindow(QMainWindow):
         line.setStyleSheet("background-color: #30363d; max-height: 1px;")
         layout.addWidget(line)
 
-        # Sistem Başlatma / Durdurma Grubu
+        # Sistem Başlatma / Durdurma & ZMQ Test Grubu
         sys_group = QGroupBox("SİSTEM KONTROLÜ")
         sys_layout = QVBoxLayout(sys_group)
-        sys_layout.setSpacing(12)
+        sys_layout.setSpacing(10)
 
         # "Sistemi Başlat" Butonu
         self.btn_start = QPushButton("Sistemi Başlat")
@@ -309,6 +340,14 @@ class TacticalMainWindow(QMainWindow):
         self.btn_start.setCursor(Qt.PointingHandCursor)
         self.btn_start.clicked.connect(self.toggle_system)
         sys_layout.addWidget(self.btn_start)
+
+        # "Bağlantı Testi" Butonu (ZMQ Ping Test)
+        self.btn_ping = QPushButton("Bağlantı Testi")
+        self.btn_ping.setObjectName("btn_ping")
+        self.btn_ping.setToolTip("ZeroMQ PUB/SUB köprüsünü PING mesajı ile test eder")
+        self.btn_ping.setCursor(Qt.PointingHandCursor)
+        self.btn_ping.clicked.connect(self.perform_zmq_ping_test)
+        sys_layout.addWidget(self.btn_ping)
 
         # Sistem Durum Göstergesi
         self.lbl_system_status = QLabel("● DURUM: BEKLEMEDE")
@@ -345,9 +384,9 @@ class TacticalMainWindow(QMainWindow):
 
         lbl_m1 = QLabel("✔ Spektrum Analizörü (Hazır)")
         lbl_m1.setStyleSheet("color: #00ff66; font-size: 11px;")
-        lbl_m2 = QLabel("✔ RF Link Bütçesi Hesaplayıcı (Aktif)")
+        lbl_m2 = QLabel("✔ RF Link Bütçesi Hesaplayıcı")
         lbl_m2.setStyleSheet("color: #00ff66; font-size: 11px;")
-        lbl_m3 = QLabel("✔ Friis Serbest Uzay Yayılım Modeli")
+        lbl_m3 = QLabel("✔ ZeroMQ PUB/SUB (127.0.0.1:5555)")
         lbl_m3.setStyleSheet("color: #58a6ff; font-size: 11px;")
 
         mod_layout.addWidget(lbl_m1)
@@ -648,6 +687,20 @@ class TacticalMainWindow(QMainWindow):
         )
         self.freq_badge.setText(f"Frekans: {freq_mhz:.2f} MHz")
 
+    def perform_zmq_ping_test(self):
+        """ZeroMQ PUB/SUB köprüsünü test eder ve sonucu konsola ile arayüze yansıtır."""
+        success, detail = execute_ping_test(
+            publisher=self.zmq_pub,
+            subscriber=self.zmq_sub,
+            address="tcp://127.0.0.1:5555",
+        )
+        if success:
+            self.status_msg.setText("ZMQ Testi Başarılı: PING -> Alındı (tcp://127.0.0.1:5555)")
+            self.status_msg.setStyleSheet("color: #00ff66; font-weight: bold;")
+        else:
+            self.status_msg.setText(f"ZMQ Test Hatası: {detail}")
+            self.status_msg.setStyleSheet("color: #ff4d4f; font-weight: bold;")
+
     def setup_status_bar(self):
         """Alt taktik durum çubuğunu yapılandırır."""
         status_bar = self.statusBar()
@@ -703,6 +756,14 @@ class TacticalMainWindow(QMainWindow):
             )
             self.status_msg.setText("Sistem Durduruldu - Beklemede")
             self.status_msg.setStyleSheet("color: #ffaa00; font-weight: bold;")
+
+    def closeEvent(self, event):
+        """Pencere kapatıldığında ZeroMQ soketlerini temizler."""
+        if self.zmq_pub:
+            self.zmq_pub.close()
+        if self.zmq_sub:
+            self.zmq_sub.close()
+        event.accept()
 
 
 def main():
