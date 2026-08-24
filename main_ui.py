@@ -3,8 +3,8 @@
 """
 Antigravity Taktik SDR Terminali - Ana Kullanıcı Arayüzü (Main UI)
 Çoklu İş Parçacıklı (QThread) Spektrum & Şelale Göstergesi, AM/FM/NBFM Yazılımsal Demodülasyon,
-Dijital Telemetri Çözücü, Ses Çıkışı, I/Q Sinyal Kayıt/Oynatma, RF Link Bütçesi Hesaplayıcı ve
-Dahili İnteraktif Eğitim & Sistem Rehberi (User Manual).
+Dijital Telemetri Çözücü, Ses Çıkışı, I/Q Sinyal Kayıt/Oynatma, RF Link Bütçesi Hesaplayıcı,
+Dahili İnteraktif Eğitim & Sistem Rehberi (User Manual) ve Otomatik Word Rapor Üreteci (Phase 14).
 """
 
 import os
@@ -48,6 +48,7 @@ from demodulator import (
     demodulate_fm,
     demodulate_nbfm,
 )
+from report_generator import generate_report
 from rf_calculator import compute_link_budget
 from signal_recorder import IQPlaybackThread, IQRecorder
 from user_manual import get_user_manual_html
@@ -250,6 +251,18 @@ QPushButton#btn_ping {
 }
 
 QPushButton#btn_ping:hover {
+    background-color: #243b55;
+    color: #ffffff;
+    border: 1px solid #79c0ff;
+}
+
+QPushButton#btn_report {
+    background-color: #1a2736;
+    color: #58a6ff;
+    border: 1px solid #388bfd;
+}
+
+QPushButton#btn_report:hover {
     background-color: #243b55;
     color: #ffffff;
     border: 1px solid #79c0ff;
@@ -522,8 +535,8 @@ class TacticalMainWindow(QMainWindow):
         self.dsp_worker.record_stats_signal.connect(self.on_record_stats_update)
         self.dsp_worker.log_signal.connect(self.log_message)
 
-        self.log_message("SYSTEM", "Antigravity Taktik SDR Terminali başlatıldı (Faz 13 - Sistem Rehberi Eklendi).")
-        self.log_message("INFO", "Taktik GUI ve Dahili Eğitim Kılavuzu yüklendi.")
+        self.log_message("SYSTEM", "Antigravity Taktik SDR Terminali başlatıldı (Faz 14 - Otomatik Word Raporlama Eklendi).")
+        self.log_message("INFO", "Taktik GUI, Dahili Sistem Rehberi ve Word Raporlama Motoru hazır.")
 
         self.calculate_rf_coverage()
 
@@ -611,6 +624,13 @@ class TacticalMainWindow(QMainWindow):
         self.btn_ping.setCursor(Qt.PointingHandCursor)
         self.btn_ping.clicked.connect(self.perform_zmq_ping_test)
         sys_layout.addWidget(self.btn_ping)
+
+        self.btn_report = QPushButton("Rapor Oluştur (Word)")
+        self.btn_report.setObjectName("btn_report")
+        self.btn_report.setToolTip("Proje geçmişini ve sistem mimarisini içeren resmi Word geliştirme raporunu (.docx) oluşturur")
+        self.btn_report.setCursor(Qt.PointingHandCursor)
+        self.btn_report.clicked.connect(self.generate_word_report)
+        sys_layout.addWidget(self.btn_report)
 
         self.lbl_system_status = QLabel("● DURUM: BEKLEMEDE")
         self.lbl_system_status.setStyleSheet(
@@ -1564,6 +1584,18 @@ class TacticalMainWindow(QMainWindow):
             self.status_msg.setText(f"ZMQ Test Hatası: {detail}")
             self.status_msg.setStyleSheet("color: #ff4d4f; font-weight: bold;")
             self.log_message("HATA", f"ZMQ Bağlantı Testi Başarısız: {detail}")
+
+    def generate_word_report(self):
+        """Otomatik Word Geliştirme Raporunu (.docx) oluşturur (Phase 14)."""
+        try:
+            output_file = generate_report()
+            self.log_message("BİLGİ", "Geliştirme raporu (Word) başarıyla oluşturuldu.")
+            self.status_msg.setText("Rapor Oluşturuldu: Antigravity_Gelistirme_Raporu.docx")
+            self.status_msg.setStyleSheet("color: #00ff66; font-weight: bold;")
+        except Exception as exc:
+            self.log_message("HATA", f"Geliştirme raporu oluşturulurken hata: {exc}")
+            self.status_msg.setText(f"Rapor Hatası: {exc}")
+            self.status_msg.setStyleSheet("color: #ff4d4f; font-weight: bold;")
 
     def setup_status_bar(self):
         status_bar = self.statusBar()

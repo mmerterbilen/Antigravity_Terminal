@@ -2,3 +2,4 @@ PyQt5
 pyqtgraph
 numpy
 pyzmq
+python-docx

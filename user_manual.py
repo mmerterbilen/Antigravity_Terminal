@@ -251,7 +251,7 @@ def get_user_manual_html() -> str:
 
 <ul>
     <li><span style="color:#00ff66; font-weight:bold;">[SİSTEM]</span> Başlangıç, kapanış ve çekirdek servis durumları.</li>
-    <li><span style="color:#58a6ff; font-weight:bold;">[BİLGİ]</span> ZMQ soket bağlantıları, yapılandırma değişiklikleri.</li>
+    <li><span style="color:#58a6ff; font-weight:bold;">[BİLGİ]</span> ZMQ soket bağlantıları, yapılandırma değişiklikleri ve rapor oluşturma.</li>
     <li><span style="color:#39ff14; font-weight:bold;">[DURUM]</span> DSP iş parçacığı ve veri akışı başlatma/durdurma olayları.</li>
     <li><span style="color:#ff7b72; font-weight:bold;">[KAYIT]</span> Ham I/Q kayıt dosyası oluşturma ve tamamlama bildirimleri.</li>
     <li><span style="color:#38d39f; font-weight:bold;">[OYNATMA]</span> I/Q kayıt oynatıcısı durumu ve dosya yükleme bilgileri.</li>
@@ -259,8 +259,22 @@ def get_user_manual_html() -> str:
     <li><span style="color:#ffd33d; font-weight:bold;">[UYARI]</span> ve <span style="color:#ff7b72; font-weight:bold;">[HATA]</span> Sistem uyarıları, paket kayıpları ve istisnalar.</li>
 </ul>
 
+<!-- BÖLÜM 8 -->
+<h2>8. OTOMATİK WORD RAPOR ÜRETECİ (WORD REPORT GENERATOR)</h2>
+<p>Terminal, projenin tüm teknik aşamalarını ve mimarisini içeren resmi bir mühendislik raporu oluşturabilir:</p>
+
+<div class="card">
+    <h3>📄 Rapor Oluşturma Adımları:</h3>
+    <ol>
+        <li>Sol kontrol panelindeki <span class="accent-blue">"Rapor Oluştur (Word)"</span> butonuna tıklayın.</li>
+        <li>Sistem, Git geçmişini (git log) otomatik analiz eder ve tüm tamamlanmış aşamaları kronolojik olarak derler.</li>
+        <li>Proje ana dizininde <span class="badge">Antigravity_Gelistirme_Raporu.docx</span> dosyası oluşturulur.</li>
+        <li>İşlem tamamlandığında konsolda <span class="accent-blue">[BİLGİ] Geliştirme raporu (Word) başarıyla oluşturuldu.</span> bildirimi görüntülenir.</li>
+    </ol>
+</div>
+
 <div class="card" style="text-align: center; color: #8b949e; font-size: 11px;">
-    ANTIGRAVITY TAKTİK SDR TERMİNALİ // GELİŞMİŞ RADYO VE SPEKTRUM ANALİZ SİSTEMİ v1.3.0
+    ANTIGRAVITY TAKTİK SDR TERMİNALİ // GELİŞMİŞ RADYO VE SPEKTRUM ANALİZ SİSTEMİ v1.4.0
 </div>
 
 </body>
