@@ -303,7 +303,7 @@ class ReportGenerator:
         p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p_sub.paragraph_format.space_after = Pt(14)
 
-        run_sub = p_sub.add_run("Sistem Mimarisi ve Aşama Geliştirme Raporu (Phase 1 - 14)")
+        run_sub = p_sub.add_run("Sistem Mimarisi ve Aşama Geliştirme Raporu (Phase 1 - 15)")
         run_sub.font.name = 'Segoe UI'
         run_sub.font.size = Pt(13)
         run_sub.font.bold = True
@@ -572,7 +572,9 @@ class ReportGenerator:
             ("Phase 13: Dahili Kullanıcı Kılavuzu ve Eğitim Merkezi (User Manual)",
              "Sistemin tüm teorik ve pratik kullanım adımlarını anlatan zengin HTML/CSS formatında interaktif eğitim kılavuzu hazırlandı."),
             ("Phase 14: Otomatik Word Dokümanı Rapor Üreteci (Automated Report Generator)",
-             "Git commit geçmişinden beslenen, sistem mimarisini ve aşama ilerlemelerini derleyen otomatik .docx mühendislik raporu motoru tamamlandı.")
+             "Git commit geçmişinden beslenen, sistem mimarisini ve aşama ilerlemelerini derleyen otomatik .docx mühendislik raporu motoru tamamlandı."),
+            ("Phase 15: Elektronik Harp (EW) ve Jammer Simülasyonu (Electronic Warfare & Jammer)",
+             "Arayüzden kontrol edilen taktik geniş bant Gauss baraj karıştırıcısı (Barrage Jamming), ZMQ iki yönlü kontrol kanalı, canlı spektrum/şelale gürültü basımı ve telemetri bozulma/BER simülasyonu entegre edildi.")
         ]
 
         for p_title, p_desc in phase_descriptions:

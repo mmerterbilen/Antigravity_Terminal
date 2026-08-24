@@ -273,8 +273,21 @@ def get_user_manual_html() -> str:
     </ol>
 </div>
 
+<!-- BÖLÜM 9 -->
+<h2>9. ELEKTRONİK HARP (EW) VE RF JAMMER SİSTEMİ</h2>
+<p>Terminal, aktif radar ve telsiz haberleşme yayınlarını engellemek ve simüle etmek amacıyla taktik Elektronik Harp alt yapısı barındırır:</p>
+
+<div class="card">
+    <h3>⚡ Karıştırıcı (Barrage Jammer) Çalışma Modeli:</h3>
+    <ul>
+        <li><span class="accent-red">Baraj Karıştırma (Barrage Jamming):</span> Jammer aktif edildiğinde geniş bant yüksek genlikli Gauss gürültüsü I/Q spektrumuna basılır ve temiz sinyaller spektrum/şelale ekranında gürültüye gömülür.</li>
+        <li><span class="highlight">Dinamik Güç Kontrolü:</span> Jammer gücü (%0 - %100) ZMQ kontrol kanalı (<code>tcp://127.0.0.1:5556</code>) üzerinden DSP motoruna anlık aktarılır.</li>
+        <li><span class="accent-yellow">Telemetri Bozulması (BER):</span> Yüksek gürültü altında FSK dijital telemetri çözücüsü kilitlenir, Bit Hata Oranı (BER) kritik seviyelere fırlar ve arayüzde karıştırma alarmı verilir.</li>
+    </ul>
+</div>
+
 <div class="card" style="text-align: center; color: #8b949e; font-size: 11px;">
-    ANTIGRAVITY TAKTİK SDR TERMİNALİ // GELİŞMİŞ RADYO VE SPEKTRUM ANALİZ SİSTEMİ v1.4.0
+    ANTIGRAVITY TAKTİK SDR TERMİNALİ // GELİŞMİŞ RADYO VE SPEKTRUM ANALİZ SİSTEMİ v1.5.0
 </div>
 
 </body>

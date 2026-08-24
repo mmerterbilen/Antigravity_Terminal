@@ -4,7 +4,8 @@
 Antigravity Taktik SDR Terminali - Ana Kullanıcı Arayüzü (Main UI)
 Çoklu İş Parçacıklı (QThread) Spektrum & Şelale Göstergesi, AM/FM/NBFM Yazılımsal Demodülasyon,
 Dijital Telemetri Çözücü, Ses Çıkışı, I/Q Sinyal Kayıt/Oynatma, RF Link Bütçesi Hesaplayıcı,
-Dahili İnteraktif Eğitim & Sistem Rehberi (User Manual) ve Otomatik Word Rapor Üreteci (Phase 14).
+Dahili İnteraktif Eğitim & Sistem Rehberi (User Manual), Otomatik Word Rapor Üreteci ve
+Elektronik Harp & Jammer Simülasyonu (Phase 15).
 """
 
 import os
@@ -297,6 +298,57 @@ QPushButton#btn_small:hover {
     border-color: #8b949e;
 }
 
+QPushButton#btn_jammer_inactive {
+    background-color: #21262d;
+    color: #f0f6fc;
+    border: 1px solid #30363d;
+}
+
+QPushButton#btn_jammer_inactive:hover {
+    background-color: #30363d;
+    color: #ff7b72;
+    border: 1px solid #ff7b72;
+}
+
+QPushButton#btn_jammer_active {
+    background-color: #7a1d24;
+    color: #ffffff;
+    border: 1px solid #ff4d4f;
+}
+
+QPushButton#btn_jammer_active:hover {
+    background-color: #96252e;
+    color: #ffffff;
+    border: 1px solid #ff7b72;
+}
+
+/* --- QSlider Taktik Stili --- */
+QSlider::groove:horizontal {
+    height: 6px;
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 3px;
+}
+
+QSlider::sub-page:horizontal {
+    background: #ff7b72;
+    border-radius: 3px;
+}
+
+QSlider::handle:horizontal {
+    background: #f0f6fc;
+    border: 2px solid #ff7b72;
+    width: 14px;
+    margin-top: -5px;
+    margin-bottom: -5px;
+    border-radius: 7px;
+}
+
+QSlider::handle:horizontal:hover {
+    background: #ff7b72;
+    border-color: #ffffff;
+}
+
 /* --- Çerçeve ve Bölücüler --- */
 QFrame#sidebar {
     background-color: #161b22;
@@ -507,6 +559,9 @@ class TacticalMainWindow(QMainWindow):
         self.is_recording = False
         self.is_playing = False
         self.audio_output_enabled = False
+        self.jammer_active = False
+        self.jammer_power = 50
+        self.latest_noise_floor = -115.0
 
         self.sample_rate = 2.048e6
         self.center_freq_mhz = 433.0
@@ -523,6 +578,8 @@ class TacticalMainWindow(QMainWindow):
         self.audio_engine = TacticalAudioOutput(sample_rate=8000)
 
         self.zmq_pub = None
+        self.ew_pub = None
+        self.ew_control_address = "tcp://127.0.0.1:5556"
         self.init_zmq()
 
         self.init_ui()
@@ -535,8 +592,8 @@ class TacticalMainWindow(QMainWindow):
         self.dsp_worker.record_stats_signal.connect(self.on_record_stats_update)
         self.dsp_worker.log_signal.connect(self.log_message)
 
-        self.log_message("SYSTEM", "Antigravity Taktik SDR Terminali başlatıldı (Faz 14 - Otomatik Word Raporlama Eklendi).")
-        self.log_message("INFO", "Taktik GUI, Dahili Sistem Rehberi ve Word Raporlama Motoru hazır.")
+        self.log_message("SYSTEM", "Antigravity Taktik SDR Terminali başlatıldı (Faz 15 - Elektronik Harp / Jammer Eklendi).")
+        self.log_message("INFO", "Taktik GUI, Dahili Sistem Rehberi ve Elektronik Harp Kontrol Modülü hazır.")
 
         self.calculate_rf_coverage()
 
@@ -545,6 +602,11 @@ class TacticalMainWindow(QMainWindow):
             self.zmq_pub = ZMQPublisher(address="tcp://127.0.0.1:5555", bind_mode=False)
         except Exception as e:
             print(f"[ZMQ HATA] {e}")
+
+        try:
+            self.ew_pub = ZMQPublisher(address=self.ew_control_address, bind_mode=True)
+        except Exception as e:
+            print(f"[ZMQ EW PUB HATA] {e}")
 
     def init_ui(self):
         self.setWindowTitle("Antigravity Taktik SDR Terminali")
@@ -720,7 +782,45 @@ class TacticalMainWindow(QMainWindow):
 
         layout.addWidget(rf_group)
 
-        # 4. Aktif Modüller
+        # 4. Elektronik Harp (EW)
+        ew_group = QGroupBox("ELEKTRONİK HARP (EW)")
+        ew_layout = QVBoxLayout(ew_group)
+        ew_layout.setSpacing(8)
+
+        lbl_ew_sub = QLabel("TAKTİK RF KARIŞTIRICI / JAMMER")
+        lbl_ew_sub.setStyleSheet("font-size: 10px; color: #ff7b72; font-weight: bold;")
+        ew_layout.addWidget(lbl_ew_sub)
+
+        self.btn_jammer = QPushButton("Jammer (Karıştırıcı) Aktif")
+        self.btn_jammer.setObjectName("btn_jammer_inactive")
+        self.btn_jammer.setCheckable(True)
+        self.btn_jammer.setChecked(False)
+        self.btn_jammer.setCursor(Qt.PointingHandCursor)
+        self.btn_jammer.setToolTip("Taktik RF Karıştırıcıyı (Jammer) açar / kapatır")
+        self.btn_jammer.clicked.connect(self.toggle_jammer)
+        ew_layout.addWidget(self.btn_jammer)
+
+        self.lbl_jammer_status = QLabel("● JAMMER: PASİF")
+        self.lbl_jammer_status.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.lbl_jammer_status.setAlignment(Qt.AlignCenter)
+        ew_layout.addWidget(self.lbl_jammer_status)
+
+        # Jammer Gücü Slider
+        self.lbl_jammer_power = QLabel(f"Jammer Gücü: %{self.jammer_power}")
+        self.lbl_jammer_power.setStyleSheet("color: #c9d1d9; font-size: 11px; font-weight: bold;")
+        ew_layout.addWidget(self.lbl_jammer_power)
+
+        self.slider_jammer = QSlider(Qt.Horizontal)
+        self.slider_jammer.setRange(0, 100)
+        self.slider_jammer.setValue(self.jammer_power)
+        self.slider_jammer.setCursor(Qt.PointingHandCursor)
+        self.slider_jammer.setToolTip("Jammer RF Çıkış Gücü Seviyesi (%0 - %100)")
+        self.slider_jammer.valueChanged.connect(self.on_jammer_power_changed)
+        ew_layout.addWidget(self.slider_jammer)
+
+        layout.addWidget(ew_group)
+
+        # 5. Aktif Modüller
         module_group = QGroupBox("AKTİF MODÜLLER")
         mod_layout = QVBoxLayout(module_group)
         mod_layout.setSpacing(5)
@@ -735,12 +835,15 @@ class TacticalMainWindow(QMainWindow):
         lbl_m4.setStyleSheet("color: #00ff66; font-size: 11px;")
         lbl_m5 = QLabel("✔ Spektrum & Şelale Göstergesi")
         lbl_m5.setStyleSheet("color: #00ff66; font-size: 11px;")
+        lbl_m6 = QLabel("✔ Elektronik Harp (EW) Modülü")
+        lbl_m6.setStyleSheet("color: #00ff66; font-size: 11px;")
 
         mod_layout.addWidget(lbl_m1)
         mod_layout.addWidget(lbl_m2)
         mod_layout.addWidget(lbl_m3)
         mod_layout.addWidget(lbl_m4)
         mod_layout.addWidget(lbl_m5)
+        mod_layout.addWidget(lbl_m6)
 
         layout.addWidget(module_group)
 
@@ -1014,26 +1117,52 @@ class TacticalMainWindow(QMainWindow):
         proto = pkt["protokol"]
         coords = pkt["koordinat"]
         rssi = pkt["rssi_dbm"]
-        ber = pkt["ber_orani"]
-        msg = pkt["mesaj"]
         ts = pkt["zaman"]
 
-        html = (
-            f'<div style="margin-bottom: 6px; border-bottom: 1px solid #21262d; padding-bottom: 4px;">'
-            f'<span style="color: #6e7681;">[{ts}]</span> '
-            f'<span style="color: #00ff66; font-weight: bold;">[PAKET #{pkt_no:04d}]</span> '
-            f'<span style="color: #58a6ff; font-weight: bold;">{callsign}</span> '
-            f'<span style="color: #8b949e;">({station})</span> | '
-            f'<span style="color: #ffd33d;">Protokol: {proto}</span> | '
-            f'<span style="color: #38d39f;">Konum: {coords}</span> | '
-            f'<span style="color: #79c0ff;">RSSI: {rssi} dBm</span> | '
-            f'<span style="color: #ff7b72;">BER: {ber}</span><br>'
-            f'<span style="color: #f0f6fc; margin-left: 20px;">↳ {msg}</span>'
-            f'</div>'
-        )
-        self.txt_decoder.append(html)
-        self.txt_decoder.moveCursor(QTextCursor.End)
-        self.log_message("BİLGİ", f"Dijital Telemetri Çözüldü: {callsign} ({coords}) RSSI={rssi}dBm")
+        is_jammed = self.jammer_active or (hasattr(self, "latest_noise_floor") and self.latest_noise_floor > -75.0)
+
+        if is_jammed:
+            ber_val = np.random.uniform(42.5, 98.9)
+            ber_str = f"{ber_val:.2f}%"
+            err_msg = "[HATA] Sinyal Karıştırma Tespit Edildi (JAMMING) - Veri Okunamıyor"
+            corrupted_coords = "??.????° K, ??.????° D"
+
+            html = (
+                f'<div style="margin-bottom: 6px; border-bottom: 1px solid #5c1d24; padding-bottom: 4px; background-color: #1a0d10;">'
+                f'<span style="color: #6e7681;">[{ts}]</span> '
+                f'<span style="color: #ff7b72; font-weight: bold;">[PAKET #{pkt_no:04d} - BOZUK]</span> '
+                f'<span style="color: #ff7b72; font-weight: bold;">{callsign}</span> '
+                f'<span style="color: #8b949e;">({station})</span> | '
+                f'<span style="color: #ffd33d;">Protokol: {proto}</span> | '
+                f'<span style="color: #ff7b72;">Konum: {corrupted_coords}</span> | '
+                f'<span style="color: #ff7b72;">RSSI: {rssi} dBm</span> | '
+                f'<span style="color: #ff4d4f; font-weight: bold;">BER: {ber_str} [KRİTİK]</span><br>'
+                f'<span style="color: #ff4d4f; font-weight: bold; margin-left: 20px;">↳ {err_msg}</span>'
+                f'</div>'
+            )
+            self.txt_decoder.append(html)
+            self.txt_decoder.moveCursor(QTextCursor.End)
+            self.log_message("HATA", f"Telemetri Hatası: {err_msg} (BER: {ber_str})")
+        else:
+            ber = pkt["ber_orani"]
+            msg = pkt["mesaj"]
+
+            html = (
+                f'<div style="margin-bottom: 6px; border-bottom: 1px solid #21262d; padding-bottom: 4px;">'
+                f'<span style="color: #6e7681;">[{ts}]</span> '
+                f'<span style="color: #00ff66; font-weight: bold;">[PAKET #{pkt_no:04d}]</span> '
+                f'<span style="color: #58a6ff; font-weight: bold;">{callsign}</span> '
+                f'<span style="color: #8b949e;">({station})</span> | '
+                f'<span style="color: #ffd33d;">Protokol: {proto}</span> | '
+                f'<span style="color: #38d39f;">Konum: {coords}</span> | '
+                f'<span style="color: #79c0ff;">RSSI: {rssi} dBm</span> | '
+                f'<span style="color: #ff7b72;">BER: {ber}</span><br>'
+                f'<span style="color: #f0f6fc; margin-left: 20px;">↳ {msg}</span>'
+                f'</div>'
+            )
+            self.txt_decoder.append(html)
+            self.txt_decoder.moveCursor(QTextCursor.End)
+            self.log_message("BİLGİ", f"Dijital Telemetri Çözüldü: {callsign} ({coords}) RSSI={rssi}dBm")
 
     def clear_decoder_log(self):
         self.txt_decoder.clear()
@@ -1113,6 +1242,10 @@ class TacticalMainWindow(QMainWindow):
             tag = "BAŞARILI"
             tag_color = "#00ff66"
             text_color = "#f0f6fc"
+        elif level_upper in ["EW", "JAMMER", "ELEKTRONİK HARP"]:
+            tag = "ELEKTRONİK HARP"
+            tag_color = "#ff4d4f"
+            text_color = "#ffa198"
         else:
             tag = level_upper
             tag_color = "#8b949e"
@@ -1413,6 +1546,7 @@ class TacticalMainWindow(QMainWindow):
         self.card_peak_freq.setText(f"{peak_freq_khz:+.1f} kHz")
         self.card_peak_pwr.setText(f"{peak_pwr:.1f} dB")
         self.card_noise_floor.setText(f"{noise_floor_est:.1f} dB")
+        self.latest_noise_floor = noise_floor_est
 
         now = time.time()
         dt = now - self.last_fps_time
@@ -1597,6 +1731,51 @@ class TacticalMainWindow(QMainWindow):
             self.status_msg.setText(f"Rapor Hatası: {exc}")
             self.status_msg.setStyleSheet("color: #ff4d4f; font-weight: bold;")
 
+    def publish_ew_control_state(self):
+        """Elektronik Harp (Jammer) durumunu ZMQ üzerinden JSON formatında (tcp://127.0.0.1:5556) yayınlar."""
+        payload = {
+            "jammer_active": bool(self.jammer_active),
+            "jammer_power": int(self.jammer_power),
+        }
+        if self.ew_pub:
+            self.ew_pub.send_json(payload)
+
+    def toggle_jammer(self):
+        """Elektronik Harp: Jammer (Karıştırıcı) modunu açar / kapatır."""
+        self.jammer_active = self.btn_jammer.isChecked()
+        self.publish_ew_control_state()
+        if self.jammer_active:
+            self.btn_jammer.setText("Jammer: AKTİF")
+            self.btn_jammer.setObjectName("btn_jammer_active")
+            self.btn_jammer.setStyleSheet(
+                "background-color: #7a1d24; color: #ffffff; border: 1px solid #ff4d4f; border-radius: 6px; padding: 7px 14px; font-weight: bold; font-size: 12px;"
+            )
+            self.lbl_jammer_status.setText(f"● JAMMER: AKTİF (%{self.jammer_power})")
+            self.lbl_jammer_status.setStyleSheet("color: #ff4d4f; font-weight: bold; font-size: 11px;")
+            self.log_message("EW", f"Jammer (Karıştırıcı) AKTİF edildi. RF Çıkış Gücü: %{self.jammer_power}")
+            self.status_msg.setText(f"ELEKTRONİK HARP: Jammer Aktif (%{self.jammer_power})")
+            self.status_msg.setStyleSheet("color: #ff4d4f; font-weight: bold;")
+        else:
+            self.btn_jammer.setText("Jammer (Karıştırıcı) Aktif")
+            self.btn_jammer.setObjectName("btn_jammer_inactive")
+            self.btn_jammer.setStyleSheet(
+                "background-color: #21262d; color: #f0f6fc; border: 1px solid #30363d; border-radius: 6px; padding: 7px 14px; font-weight: bold; font-size: 12px;"
+            )
+            self.lbl_jammer_status.setText("● JAMMER: PASİF")
+            self.lbl_jammer_status.setStyleSheet("color: #8b949e; font-size: 11px;")
+            self.log_message("EW", "Jammer (Karıştırıcı) devreden çıkarıldı (Pasif).")
+            self.status_msg.setText("Hazır")
+            self.status_msg.setStyleSheet("color: #00ff66; font-weight: bold;")
+
+    def on_jammer_power_changed(self, value: int):
+        """Jammer çıkış gücü seviyesi değiştiğinde tetiklenir."""
+        self.jammer_power = value
+        self.lbl_jammer_power.setText(f"Jammer Gücü: %{value}")
+        self.publish_ew_control_state()
+        if self.jammer_active:
+            self.lbl_jammer_status.setText(f"● JAMMER: AKTİF (%{value})")
+            self.status_msg.setText(f"ELEKTRONİK HARP: Jammer Aktif (%{value})")
+
     def setup_status_bar(self):
         status_bar = self.statusBar()
 
@@ -1677,6 +1856,8 @@ class TacticalMainWindow(QMainWindow):
             self.audio_engine.stop_audio()
         if self.zmq_pub:
             self.zmq_pub.close()
+        if hasattr(self, "ew_pub") and self.ew_pub:
+            self.ew_pub.close()
         event.accept()
 
 

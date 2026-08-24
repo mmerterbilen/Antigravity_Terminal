@@ -13,7 +13,7 @@ import time
 import numpy as np
 import zmq
 
-from zmq_manager import ZMQPublisher, DEFAULT_ZMQ_ADDRESS
+from zmq_manager import ZMQPublisher, ZMQSubscriber, DEFAULT_ZMQ_ADDRESS
 
 
 class AdvancedMockDSPNode:
@@ -22,19 +22,28 @@ class AdvancedMockDSPNode:
     def __init__(
         self,
         address: str = DEFAULT_ZMQ_ADDRESS,
+        ew_control_address: str = "tcp://127.0.0.1:5556",
         sample_count: int = 1024,
         target_fps: float = 20.0,
         noise_level: float = 0.08,
     ):
         self.address = address
+        self.ew_control_address = ew_control_address
         self.sample_count = sample_count
         self.target_fps = target_fps
         self.frame_interval = 1.0 / target_fps
         self.noise_level = noise_level
         self.running = False
 
-        # ZMQ Yayıncı
+        # Elektronik Harp (EW) Durum Değişkenleri
+        self.jammer_active = False
+        self.jammer_power = 0
+
+        # ZMQ Yayıncı (I/Q Data PUB)
         self.publisher = ZMQPublisher(address=self.address, bind_mode=True)
+
+        # ZMQ Abone (EW Control SUB)
+        self.ew_subscriber = ZMQSubscriber(address=self.ew_control_address, topics=[""])
 
         # Sürekli Faz Akümülatörleri (Süreksizlik ve Sahte Spektral Sızıntıları Önler)
         self.sweep_phase = 0.0
@@ -44,6 +53,24 @@ class AdvancedMockDSPNode:
         # Frekans Tarama Parametreleri
         self.sweep_speed = 0.025  # Tarama döngü hızı
         self.sweep_width = 0.38   # Normalized frekans tarama genişliği (-0.38 .. +0.38)
+
+    def check_ew_control_messages(self):
+        """Arayüzden (UI) gelen Elektronik Harp (EW) kontrol komutlarını bloklamasız dinler."""
+        if not self.ew_subscriber:
+            return
+        while True:
+            msg = self.ew_subscriber.receive_json(flags=zmq.NOBLOCK)
+            if msg is None:
+                break
+            if isinstance(msg, dict) and "jammer_active" in msg and "jammer_power" in msg:
+                self.jammer_active = bool(msg["jammer_active"])
+                self.jammer_power = int(msg["jammer_power"])
+
+                status_str = "AKTİF" if self.jammer_active else "PASİF"
+                print(
+                    f"[ELEKTRONİK HARP] ZMQ Komutu Alındı -> Jammer: {status_str} | Güç: %{self.jammer_power}",
+                    flush=True,
+                )
 
     def generate_modulated_iq(self, frame_idx: int) -> np.ndarray:
         """
@@ -88,8 +115,19 @@ class AdvancedMockDSPNode:
             self.pulse_phase = (pulse_phases[-1] + pulse_phase_delta) % (2.0 * np.pi)
             pulse_signal = 0.85 * np.exp(1j * pulse_phases)
 
-        # 5. Toplam Modüle Edilmiş I/Q Sinyali
-        iq_total = (noise + sweep_signal + cw_signal + pulse_signal).astype(np.complex64)
+        # 5. Elektronik Harp (EW) / Baraj Karıştırıcı Gürültü Enjeksiyonu (Barrage Jamming)
+        # Jammer aktif olduğunda, jammer_power (0-100) ile orantılı yüksek genlikli geniş bant Gauss gürültüsü basılır
+        jammer_noise = np.zeros(N, dtype=np.complex64)
+        if self.jammer_active and self.jammer_power > 0:
+            power_ratio = float(self.jammer_power) / 100.0
+            # Jammer gürültü standart sapması (sigma) 0.5 ile 8.0 arasında dinamik ölçeklenir
+            jam_sigma = (power_ratio * 7.5) + 0.5
+            jam_i = np.random.normal(0, jam_sigma, N)
+            jam_q = np.random.normal(0, jam_sigma, N)
+            jammer_noise = (jam_i + 1j * jam_q).astype(np.complex64)
+
+        # Toplam Modüle Edilmiş + Karıştırılmış I/Q Sinyali
+        iq_total = (noise + sweep_signal + cw_signal + pulse_signal + jammer_noise).astype(np.complex64)
         return iq_total
 
     def start(self):
@@ -113,6 +151,9 @@ class AdvancedMockDSPNode:
             while self.running:
                 loop_start = time.time()
 
+                # Gelen Elektronik Harp (EW) kontrol komutlarını kontrol et
+                self.check_ew_control_messages()
+
                 # Gelişmiş modülasyonlu I/Q verisi üret ve yayınla
                 iq_samples = self.generate_modulated_iq(frame_count)
                 self.publisher.send_iq_data(iq_samples, topic="IQ")
@@ -126,11 +167,12 @@ class AdvancedMockDSPNode:
                     actual_fps = frames_since_log / (current_time - last_log_time)
                     data_size_kb = (iq_samples.nbytes) / 1024.0
                     sweep_freq_rel = self.sweep_width * np.sin(frame_count * self.sweep_speed)
+                    ew_info = f" | Jammer: AKTİF (%{self.jammer_power})" if self.jammer_active else ""
                     print(
                         f"[DSP MODÜLASYON] Kare: {frame_count:06d} | "
                         f"Boyut: {data_size_kb:.2f} KB | "
                         f"Hız: {actual_fps:.1f} FPS | "
-                        f"Anlık Tarama Ofseti: {sweep_freq_rel:+.3f} Fs | Durum: AKTİF",
+                        f"Anlık Tarama Ofseti: {sweep_freq_rel:+.3f} Fs{ew_info} | Durum: AKTİF",
                         flush=True,
                     )
                     last_log_time = current_time
@@ -148,10 +190,12 @@ class AdvancedMockDSPNode:
             self.stop()
 
     def stop(self):
-        """DSP düğümünü ve ZMQ soketini güvenle kapatır."""
+        """DSP düğümünü ve ZMQ soketlerini güvenle kapatır."""
         self.running = False
         if self.publisher:
             self.publisher.close()
+        if self.ew_subscriber:
+            self.ew_subscriber.close()
         print("[SİSTEM] Mock DSP Düğümü sonlandırıldı. Soketler güvenle kapatıldı.", flush=True)
 
 
@@ -167,6 +211,7 @@ def handle_signal(sig, frame):
 def main():
     parser = argparse.ArgumentParser(description="Antigravity Taktik SDR - Gelişmiş Mock DSP Modülasyon Motoru")
     parser.add_argument("--address", type=str, default=DEFAULT_ZMQ_ADDRESS, help="ZMQ PUB Adresi")
+    parser.add_argument("--ew-address", type=str, default="tcp://127.0.0.1:5556", help="ZMQ EW Kontrol SUB Adresi")
     parser.add_argument("--samples", type=int, default=1024, help="Kare başına I/Q örnek sayısı")
     parser.add_argument("--fps", type=float, default=20.0, help="Yayın hızı (Kare/Saniye)")
     args = parser.parse_args()
@@ -176,6 +221,7 @@ def main():
 
     node = AdvancedMockDSPNode(
         address=args.address,
+        ew_control_address=args.ew_address,
         sample_count=args.samples,
         target_fps=args.fps,
     )
