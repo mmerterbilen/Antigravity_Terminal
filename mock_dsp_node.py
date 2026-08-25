@@ -120,8 +120,8 @@ class AdvancedMockDSPNode:
         jammer_noise = np.zeros(N, dtype=np.complex64)
         if self.jammer_active and self.jammer_power > 0:
             power_ratio = float(self.jammer_power) / 100.0
-            # Jammer gürültü standart sapması (sigma) 0.5 ile 8.0 arasında dinamik ölçeklenir
-            jam_sigma = (power_ratio * 7.5) + 0.5
+            # Jammer gürültü standart sapması (sigma) %0-%100 arasında 0.0'dan 6.0'a yumuşak ölçeklenir
+            jam_sigma = power_ratio * 6.0
             jam_i = np.random.normal(0, jam_sigma, N)
             jam_q = np.random.normal(0, jam_sigma, N)
             jammer_noise = (jam_i + 1j * jam_q).astype(np.complex64)

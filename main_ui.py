@@ -428,6 +428,17 @@ class DSPWorkerThread(QThread):
         self.volume = 1.0
         self.frame_index = 0
 
+        self.jammer_active = False
+        self.jammer_power = 0
+        self.is_playing = False
+
+    def set_jammer_config(self, active: bool, power: int):
+        self.jammer_active = active
+        self.jammer_power = power
+
+    def set_playback_state(self, is_playing: bool):
+        self.is_playing = is_playing
+
     def run(self):
         self._running = True
         ctx = zmq.Context()
@@ -451,12 +462,22 @@ class DSPWorkerThread(QThread):
                         _, iq_data = result
                         if len(iq_data) > 0:
                             latest_iq = iq_data
-                            if self.recorder.is_recording:
-                                self.recorder.write_iq_data(iq_data)
 
                     if latest_iq is not None and self._running:
                         N = len(latest_iq)
                         self.frame_index += 1
+
+                        # Yalnızca oynatma (playback) modunda yerel Jammer gürültü enjeksiyonu uygulanır
+                        # (Canlı modda gürültü kaynakta mock_dsp_node tarafından basılır, çifte gürültü engellenir)
+                        if self.is_playing and self.jammer_active and self.jammer_power > 0:
+                            power_ratio = float(self.jammer_power) / 100.0
+                            jam_sigma = power_ratio * 6.0
+                            jam_i = np.random.normal(0, jam_sigma, N)
+                            jam_q = np.random.normal(0, jam_sigma, N)
+                            latest_iq = latest_iq + (jam_i + 1j * jam_q).astype(np.complex64)
+
+                        if self.recorder.is_recording:
+                            self.recorder.write_iq_data(latest_iq)
 
                         if N not in self.window_cache:
                             self.window_cache[N] = np.hanning(N)
@@ -1124,10 +1145,16 @@ class TacticalMainWindow(QMainWindow):
         )
 
         if is_jammed:
-            ber_val = np.random.uniform(42.5, 98.9)
+            # Sinyal Karıştırma Gücü veya Taban Gürültüsü Seviyesine Bağlı Kademeli BER Hesaplaması
+            effective_power = self.jammer_power if (self.jammer_active and self.jammer_power > 0) else max(0, min(100, int((self.latest_noise_floor + 32.0) * 5.0)))
+            min_ber = min(85.0, max(0.5, effective_power * 0.75))
+            max_ber = min(99.5, max(2.0, effective_power * 0.95 + 5.0))
+            ber_val = np.random.uniform(min_ber, max_ber)
             ber_str = f"{ber_val:.2f}%"
+
+            badge_status = "[KRİTİK]" if ber_val > 30.0 else "[YÜKSEK]"
             err_msg = "[HATA] Sinyal Karıştırma Tespit Edildi (JAMMING) - Veri Okunamıyor"
-            corrupted_coords = "??.????° K, ??.????° D"
+            corrupted_coords = "??.????° K, ??.????° D" if ber_val > 25.0 else coords
 
             html = (
                 f'<div style="margin-bottom: 6px; border-bottom: 1px solid #5c1d24; padding-bottom: 4px; background-color: #1a0d10;">'
@@ -1138,7 +1165,7 @@ class TacticalMainWindow(QMainWindow):
                 f'<span style="color: #ffd33d;">Protokol: {proto}</span> | '
                 f'<span style="color: #ff7b72;">Konum: {corrupted_coords}</span> | '
                 f'<span style="color: #ff7b72;">RSSI: {rssi} dBm</span> | '
-                f'<span style="color: #ff4d4f; font-weight: bold;">BER: {ber_str} [KRİTİK]</span><br>'
+                f'<span style="color: #ff4d4f; font-weight: bold;">BER: {ber_str} {badge_status}</span><br>'
                 f'<span style="color: #ff4d4f; font-weight: bold; margin-left: 20px;">↳ {err_msg}</span>'
                 f'</div>'
             )
@@ -1633,6 +1660,8 @@ class TacticalMainWindow(QMainWindow):
             self.playback_thread.log_signal.connect(self.log_message)
 
             self.is_playing = True
+            if hasattr(self, "dsp_worker") and self.dsp_worker:
+                self.dsp_worker.set_playback_state(True)
             self.btn_play.setText("Oynatmayı Durdur")
             self.btn_play.setStyleSheet(
                 "background-color: #6e1a24; color: #ff7b72; border: 1px solid #ff7b72;"
@@ -1655,6 +1684,8 @@ class TacticalMainWindow(QMainWindow):
 
     def on_playback_finished(self):
         self.is_playing = False
+        if hasattr(self, "dsp_worker") and self.dsp_worker:
+            self.dsp_worker.set_playback_state(False)
         self.btn_play.setText("Oynatmayı Başlat")
         self.btn_play.setStyleSheet("")
         self.lbl_playback_status.setText("● OYNATMA: PASİF")
@@ -1822,6 +1853,7 @@ class TacticalMainWindow(QMainWindow):
             self.status_msg.setText("Sistem Aktif - QThread DSP Spektrum, Şelale & Demodülasyon Başlatıldı")
             self.status_msg.setStyleSheet("color: #00ff66; font-weight: bold;")
             
+            self.publish_ew_control_state()
             self.dsp_worker.start()
             self.log_message("DURUM", "Veri Akışı Aktif - Çoklu iş parçacıklı (QThread) DSP motoru başlatıldı.")
         else:
