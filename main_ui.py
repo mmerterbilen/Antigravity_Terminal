@@ -1119,7 +1119,9 @@ class TacticalMainWindow(QMainWindow):
         rssi = pkt["rssi_dbm"]
         ts = pkt["zaman"]
 
-        is_jammed = self.jammer_active or (hasattr(self, "latest_noise_floor") and self.latest_noise_floor > -75.0)
+        is_jammed = (self.jammer_active and self.jammer_power > 0) or (
+            hasattr(self, "latest_noise_floor") and self.latest_noise_floor > -22.0
+        )
 
         if is_jammed:
             ber_val = np.random.uniform(42.5, 98.9)
